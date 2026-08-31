@@ -10,6 +10,7 @@ const admin = require('firebase-admin');
 const servicesRouter = require('./services');
 const orderRouter = require('./order');
 const cronModule = require('./cron');
+const cronRouter = cronModule;
 const depositRouter = require('./deposit');
 
 const app = express();
@@ -17,14 +18,18 @@ const PORT = Number(process.env.PORT || 8080);
 
 if (!admin.apps.length) {
   const rawServiceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  if (!rawServiceAccount) throw new Error('Missing FIREBASE_SERVICE_ACCOUNT_JSON');
+  if (!rawServiceAccount) {
+    throw new Error('Missing FIREBASE_SERVICE_ACCOUNT_JSON');
+  }
   let serviceAccount;
   try {
     serviceAccount = JSON.parse(rawServiceAccount);
   } catch (error) {
     throw new Error(`Invalid FIREBASE_SERVICE_ACCOUNT_JSON: ${error.message}`);
   }
-  admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
 }
 
 const db = admin.firestore();
@@ -41,55 +46,35 @@ app.use(helmet({
   crossOriginResourcePolicy: false,
   contentSecurityPolicy: false
 }));
-
-const DEFAULT_CORS_ORIGINS = [
-  'https://tdms1vip.vercel.app',
-  'http://localhost:3000',
-  'http://localhost:5173'
-];
-
 const allowedCorsOrigins = new Set(
-  String(process.env.CORS_ORIGINS || '')
+  (process.env.CORS_ORIGINS || 'https://tdms1vip.vercel.app,http://localhost:3000,http://localhost:5173')
     .split(',')
     .map(v => v.trim().replace(/\/$/, ''))
     .filter(Boolean)
 );
 
-for (const origin of DEFAULT_CORS_ORIGINS) allowedCorsOrigins.add(origin);
-
-if (process.env.CORS_ORIGINS === '*') allowedCorsOrigins.add('*');
-
-function isAllowedOrigin(origin) {
-  return !origin || allowedCorsOrigins.has('*') || allowedCorsOrigins.has(origin);
-}
-
-// Explicit CORS headers are set before every route so even API errors keep the
-// Access-Control-Allow-Origin header and the browser can expose the response.
-app.use((req, res, next) => {
-  const origin = req.get('Origin');
-  if (isAllowedOrigin(origin)) {
-    if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
-    else if (allowedCorsOrigins.has('*')) res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Vary', 'Origin');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key, X-Cron-Secret, X-Telegram-Bot-Api-Secret-Token, X-Deposit-Signature');
-    res.setHeader('Access-Control-Max-Age', '86400');
-  }
-  if (req.method === 'OPTIONS') {
-    if (!isAllowedOrigin(origin)) return res.status(403).json({ error: 'CORS origin denied' });
-    return res.status(204).end();
-  }
-  next();
-});
-
 app.use(cors({
-  origin: (origin, callback) => callback(null, isAllowedOrigin(origin)),
+  origin: (origin, callback) => {
+    if (!origin || allowedCorsOrigins.has('*') || allowedCorsOrigins.has(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS origin denied: ${origin}`));
+  },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key', 'X-Cron-Secret', 'X-Telegram-Bot-Api-Secret-Token', 'X-Deposit-Signature'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key', 'X-Cron-Secret'],
   credentials: false,
   maxAge: 86400
 }));
-
+app.options('*', cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedCorsOrigins.has('*') || allowedCorsOrigins.has(origin)) return callback(null, true);
+    return callback(new Error(`CORS origin denied: ${origin}`));
+  },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key', 'X-Cron-Secret'],
+  credentials: false
+}));
+app.use('/api/deposits/gateway/callback', express.raw({ type: '*/*', limit: '256kb' }));
 app.use(express.json({ limit: '256kb' }));
 app.use(express.urlencoded({ extended: false, limit: '256kb' }));
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
@@ -120,33 +105,26 @@ async function verifyToken(req, res, next) {
     return res.status(401).json({ error: 'Missing authorization token' });
   }
   const token = header.slice(7).trim();
-  if (!token) return res.status(401).json({ error: 'Missing authorization token' });
+  if (!token) {
+    return res.status(401).json({ error: 'Missing authorization token' });
+  }
   try {
-    req.user = await auth.verifyIdToken(token, true);
+    const decoded = await auth.verifyIdToken(token, true);
+    req.user = decoded;
     return next();
   } catch (error) {
-    console.error('verify token:', error.message);
     return res.status(401).json({ error: 'Invalid or expired authorization token' });
   }
 }
 
 app.locals.verifyToken = verifyToken;
 
-app.get('/health', (req, res) => {
-  res.json({ ok: true, service: 'TDMS1VN', time: new Date().toISOString() });
+app.get('/api', (req, res) => {
+  res.json({ ok: true, service: 'TDMS1VN API', version: '2.1.0' });
 });
 
-// API root must be a real API response. The old server tried to serve
-// /public/index.html here, but the Railway backend repository does not contain
-// a public/ directory because the SPA is deployed separately on Vercel.
-app.get('/api', (req, res) => {
-  res.json({
-    ok: true,
-    service: 'TDMS1VN API',
-    version: '2.1.0',
-    frontend: 'https://tdms1vip.vercel.app',
-    endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me']
-  });
+app.get('/health', (req, res) => {
+  res.json({ ok: true, service: 'TDMS1VN', time: new Date().toISOString() });
 });
 
 app.get('/api/public/stats', async (req, res) => {
@@ -158,7 +136,7 @@ app.get('/api/public/stats', async (req, res) => {
     ]);
     res.json({ users: usersSnap.data().count, orders: ordersSnap.data().count, completed: completedSnap.data().count });
   } catch (error) {
-    console.error('public stats:', error);
+    console.error('public stats:', error.message);
     res.status(500).json({ error: 'Không lấy được thống kê' });
   }
 });
@@ -179,12 +157,15 @@ app.get('/api/config/public', (req, res) => {
 
 app.use('/api/services', servicesRouter);
 app.use('/api/orders', orderRouter);
-app.use('/api/cron', cronModule);
+app.use('/api/cron', cronRouter);
 app.use('/api/deposits', depositRouter);
 
 app.get('/api/balance-logs', verifyToken, async (req, res) => {
   try {
-    const snap = await db.collection('balance_logs').where('uid', '==', req.user.uid).limit(100).get();
+    const snap = await db.collection('balance_logs')
+      .where('uid', '==', req.user.uid)
+      .limit(100)
+      .get();
     const logs = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => {
       const ta = a.createdAt?.toMillis ? a.createdAt.toMillis() : new Date(a.createdAt || 0).getTime();
       const tb = b.createdAt?.toMillis ? b.createdAt.toMillis() : new Date(b.createdAt || 0).getTime();
@@ -208,20 +189,20 @@ app.get('/api/me', verifyToken, async (req, res) => {
   }
 });
 
-// This backend is API-only. Do NOT call express.static() or sendFile() here.
-// The frontend is hosted independently by Vercel.
-app.use('/api', (req, res) => res.status(404).json({ error: 'API endpoint not found', path: req.path }));
-app.use((req, res) => res.status(404).json({ error: 'Not found' }));
+app.use((req, res) => {
+  if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'API endpoint not found', path: req.path });
+  return res.status(404).json({ error: 'Not found' });
+});
 
 app.use((error, req, res, next) => {
-  console.error('Unhandled server error:', error);
+  console.error(error);
   if (res.headersSent) return next(error);
-  res.status(500).json({ error: 'Internal server error' });
+  res.status(500).json({ error: 'Internal server error', code: error?.code || 'INTERNAL_ERROR' });
 });
 
 if (require.main === module) {
   app.listen(PORT, () => {
-    console.log(`TDMS1VN API server listening on ${PORT}`);
+    console.log(`TDMS1VN full-stack server listening on ${PORT}`);
     const interval = Number(process.env.ORDER_SYNC_INTERVAL_MS || 300000);
     if (Number.isFinite(interval) && interval >= 60000) {
       setInterval(() => {
