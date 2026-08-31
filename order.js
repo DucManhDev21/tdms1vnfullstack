@@ -11,6 +11,10 @@ function providerClient() {
   return axios.create({ baseURL, timeout: Number(process.env.PROVIDER_TIMEOUT_MS || 20000) });
 }
 
+function requireUser(req, res, next) {
+  return req.app.locals.verifyToken(req, res, next);
+}
+
 function requestId(req) {
   return String(req.get('Idempotency-Key') || crypto.randomUUID());
 }
@@ -84,16 +88,10 @@ async function refundCanceledOrder(db, admin, orderId, reason) {
   });
 }
 
-router.post('/', async (req, res) => {
+router.post('/', requireUser, async (req, res) => {
   const db = req.app.locals.db;
   const admin = req.app.locals.admin;
-  const uid = req.user?.uid;
-
-  if (!uid) {
-    return res.status(401).json({
-      error: 'Unauthorized'
-    });
-  }
+  const uid = req.user.uid;
   const idem = requestId(req);
   const { serviceId, link, quantity } = req.body || {};
 
@@ -191,27 +189,20 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.get('/', async (req, res) => {
+router.get('/', requireUser, async (req, res) => {
   const db = req.app.locals.db;
-  const uid = req.user?.uid;
-
-  if (!uid) {
-    return res.status(401).json({
-      error: 'Unauthorized'
-    });
-  }
+  const uid = req.user.uid;
   try {
-    const snap = await db.collection('orders').where('uid', '==', uid).orderBy('createdAt', 'desc').limit(100).get();
-    const orders = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const snap = await db.collection('orders').where('uid', '==', uid).limit(100).get();
+    const orders = snap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a, b) => {
+      const ta = a.createdAt?.toMillis ? a.createdAt.toMillis() : new Date(a.createdAt || 0).getTime();
+      const tb = b.createdAt?.toMillis ? b.createdAt.toMillis() : new Date(b.createdAt || 0).getTime();
+      return tb - ta;
+    });
     res.json({ orders });
   } catch (error) {
     console.error('orders list:', error);
-
-    return res.status(500).json({
-      error: error.code === 9
-        ? 'Firestore thiếu composite index cho orders(uid, createdAt).'
-        : 'Không thể lấy đơn hàng'
-    });
+    res.status(500).json({ error: 'Không thể lấy đơn hàng' });
   }
 });
 
