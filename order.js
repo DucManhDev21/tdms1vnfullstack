@@ -87,7 +87,13 @@ async function refundCanceledOrder(db, admin, orderId, reason) {
 router.post('/', async (req, res) => {
   const db = req.app.locals.db;
   const admin = req.app.locals.admin;
-  const uid = req.user.uid;
+  const uid = req.user?.uid;
+
+  if (!uid) {
+    return res.status(401).json({
+      error: 'Unauthorized'
+    });
+  }
   const idem = requestId(req);
   const { serviceId, link, quantity } = req.body || {};
 
@@ -187,14 +193,25 @@ router.post('/', async (req, res) => {
 
 router.get('/', async (req, res) => {
   const db = req.app.locals.db;
-  const uid = req.user.uid;
+  const uid = req.user?.uid;
+
+  if (!uid) {
+    return res.status(401).json({
+      error: 'Unauthorized'
+    });
+  }
   try {
     const snap = await db.collection('orders').where('uid', '==', uid).orderBy('createdAt', 'desc').limit(100).get();
     const orders = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json({ orders });
   } catch (error) {
     console.error('orders list:', error);
-    res.status(500).json({ error: 'Không thể lấy đơn hàng' });
+
+    return res.status(500).json({
+      error: error.code === 9
+        ? 'Firestore thiếu composite index cho orders(uid, createdAt).'
+        : 'Không thể lấy đơn hàng'
+    });
   }
 });
 

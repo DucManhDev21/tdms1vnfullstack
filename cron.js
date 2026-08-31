@@ -120,17 +120,65 @@ async function syncOrders(req, res) {
   }
 }
 
+function getCronSecretFromRequest(req) {
+  const direct = req.get('X-Cron-Secret') || req.query.secret || '';
+  if (direct) {
+    return direct;
+  }
+
+  const authorization = req.get('Authorization') || '';
+
+  if (authorization.startsWith('Bearer ')) {
+    return authorization.slice(7).trim();
+  }
+
+  return '';
+}
+
 function cronGuard(req, res, next) {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return res.status(503).json({ error: 'CRON_SECRET not configured' });
-  const supplied = req.get('X-Cron-Secret') || req.query.secret || '';
-  if (supplied !== secret) return res.status(401).json({ error: 'Invalid cron secret' });
+  const secret = String(process.env.CRON_SECRET || '');
+
+  if (!secret) {
+    return res.status(503).json({
+      error: 'CRON_SECRET not configured'
+    });
+  }
+
+  const supplied = getCronSecretFromRequest(req);
+
+  if (supplied !== secret) {
+    return res.status(401).json({
+      error: 'Invalid cron secret'
+    });
+  }
+
   next();
 }
 
-router.get('/sync-orders', (req, res, next) => req.app.locals.verifyToken(req, res, next), async (req, res) => {
-  req.syncUid = req.user.uid;
-  return syncOrders(req, res);
+router.get('/sync-orders', async (req, res, next) => {
+  const secret = String(process.env.CRON_SECRET || '');
+  const supplied = getCronSecretFromRequest(req);
+
+  if (secret && supplied === secret) {
+    req.syncUid = null;
+    return syncOrders(req, res);
+  }
+
+  return req.app.locals.verifyToken(req, res, async (error) => {
+    if (error) {
+      return next(error);
+    }
+
+    req.syncUid = req.user?.uid;
+
+    if (!req.syncUid) {
+      return res.status(401).json({
+        error: 'Unauthorized'
+      });
+    }
+
+    return syncOrders(req, res);
+  });
 });
 
 router.post('/sync-orders', cronGuard, syncOrders);

@@ -1,55 +1,56 @@
-# TDMS1VN — Full-stack
-
-Đây là bản hợp nhất **một repository / một project**: Express vừa chạy API vừa phục vụ toàn bộ frontend tĩnh từ `public/`.
+# TDMS1VN — Full-stack Vercel
 
 ## Cấu trúc
 
-- `server.js` — Express master app, Firebase Admin, auth, API và static frontend
+- `index.html` — bản SPA dùng khi deploy Vercel
+- `server.js` — Express API + local server
+- `api/index.js` — Vercel Function adapter
 - `services.js` — Provider services
-- `order.js` — đặt đơn, trừ số dư, provider order, refund
-- `deposit.js` — nạp tiền, gateway callback, Telegram webhook
+- `order.js` — đặt đơn + Firestore Transaction + refund
+- `deposit.js` — nạp thẻ + Telegram Bot + callback
 - `cron.js` — đồng bộ trạng thái đơn
-- `public/index.html` — frontend SPA
-- `public/logo.png`
-- `public/favicon.ico`
-- `firestore.rules`
-- `.env.example`
-- `package.json`
+- `firestore.rules` — Firestore security rules
+- `vercel.json` — SPA rewrite + API rewrite
 
-## Chạy local
+## Deploy Vercel
 
-```bash
-npm install
-npm start
-```
+Repository phải có `package.json` và `server.js` ở root. Vercel dùng `api/index.js` làm serverless function, còn SPA được rewrite về `/index.html`.
 
-Mở `http://localhost:8080`.
+Environment Variables bắt buộc cho API:
 
-## Railway
+- `FIREBASE_SERVICE_ACCOUNT_JSON`
+- `PROVIDER_API_URL`
+- `PROVIDER_API_KEY`
+- `CRON_SECRET`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_ADMIN_CHAT_ID`
+- `TELEGRAM_WEBHOOK_SECRET`
 
-Import **repository này** vào Railway. Root Directory để `/` và Start Command là `npm start`.
-Railway sẽ phục vụ frontend và API cùng một domain:
+Các biến nạp thẻ là bắt buộc khi sử dụng gateway thật.
 
-- Website: `/`
-- Health: `/health`
-- API: `/api/...`
+## Telegram webhook
 
-Frontend dùng `const API_BASE = '/api'`, vì vậy không còn gọi trực tiếp sang domain Railway khác và không cần CORS cho hoạt động bình thường.
+URL:
 
-## Biến môi trường
+`https://YOUR-VERCEL-DOMAIN.vercel.app/api/deposits/telegram/webhook`
 
-Copy `.env.example` thành cấu hình Environment Variables trên Railway và điền giá trị thật. Không commit credential Firebase, Provider hoặc Telegram.
+`TELEGRAM_WEBHOOK_SECRET` phải được gửi bởi Telegram trong header `X-Telegram-Bot-Api-Secret-Token`.
 
-`FIREBASE_SERVICE_ACCOUNT_JSON` phải là JSON service-account hợp lệ trên một dòng (Railway có thể lưu nguyên JSON).
+## Cron
 
-`TELEGRAM_WEBHOOK_SECRET` là secret tùy chọn để bảo vệ endpoint Telegram webhook. URL webhook khi dùng domain Railway này là:
+`cron.js` hỗ trợ request có `Authorization: Bearer <CRON_SECRET>` hoặc `X-Cron-Secret`.
 
-`https://<RAILWAY-DOMAIN>/api/deposits/telegram/webhook`
+Vercel có thể gọi endpoint theo lịch khi project/plan của bạn hỗ trợ Cron Jobs. Vercel cung cấp Cron Jobs và cấu hình schedule trong `vercel.json`. 
 
-`DEPOSIT_CALLBACK_URL` nếu dùng cổng nạp thẻ là:
+## Vercel
 
-`https://<RAILWAY-DOMAIN>/api/deposits/gateway/callback`
+Vercel serves the static SPA from the repository root and routes `/api/*` to `api/index.js`.
+Do not put Firebase service-account JSON, Provider API keys, Telegram tokens, or webhook secrets in the repository.
 
-## Quan trọng
+## Firebase Admin claim for admin
 
-Các endpoint người dùng `/api/orders` và `/api/deposits` yêu cầu Firebase ID token. Frontend tự lấy token từ Firebase Auth và gửi `Authorization: Bearer <token>`.
+Set a Firebase Auth custom claim `admin: true` or `role: "admin"` for the Telegram/admin operator account if you also need browser-side admin access. Server-side Admin SDK operations bypass Firestore client rules.
+
+## Firestore index
+
+For the `orders`, `deposits`, and `balance_logs` queries using `where(uid == ...) + orderBy(createdAt desc)`, create the corresponding composite indexes in Firestore if Firebase reports `FAILED_PRECONDITION`.
