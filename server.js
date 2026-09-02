@@ -11,6 +11,7 @@ const servicesRouter = require('./services');
 const orderRouter = require('./order');
 const cronModule = require('./cron');
 const depositRouter = require('./deposit');
+const { startTelegramPolling } = depositRouter;
 
 const app = express();
 const PORT = Number(process.env.PORT || 8080);
@@ -134,15 +135,37 @@ app.locals.verifyToken = verifyToken;
 
 app.get('/health', (req, res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok: true, service: 'TDMS1VN', version: '5.0.0', time: new Date().toISOString() });
+  res.json({ ok: true, service: 'TDMS1VN', version: '6.0.0', time: new Date().toISOString() });
 });
 
 app.get('/api/health', (req,res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok:true, service:'TDMS1VN API', version:'5.0.0', time:new Date().toISOString() });
+  res.json({ ok:true, service:'TDMS1VN API', version:'6.0.0', time:new Date().toISOString() });
 });
 
 app.get('/api/ping', (req,res) => res.json({ ok:true, time:new Date().toISOString() }));
+
+app.get('/api/system/status', async (req, res) => {
+  try {
+    await db.collection('users').limit(1).get();
+    res.set('Cache-Control','no-store');
+    res.json({
+      ok: true,
+      api: 'online',
+      firestore: 'online',
+      telegramMode: String(process.env.TELEGRAM_BOT_MODE || 'polling').trim().toLowerCase(),
+      pricing: {
+        providerRateUnit: 'USD/1000',
+        usdVndRate: Number(process.env.USD_VND_RATE || 27000),
+        displayUnit: 'VND/1'
+      },
+      time: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('system status:', error);
+    res.status(503).json({ ok:false, api:'online', firestore:'error', error:'Firestore unavailable' });
+  }
+});
 
 // API root must be a real API response. The old server tried to serve
 // /public/index.html here, but the Railway backend repository does not contain
@@ -151,7 +174,7 @@ app.get('/api', (req, res) => {
   res.json({
     ok: true,
     service: 'TDMS1VN API',
-    version: '5.0.0',
+    version: '6.0.0',
     frontend: 'https://tdms1vip.vercel.app',
     endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me']
   });
@@ -186,7 +209,7 @@ app.get('/api/config/public', (req, res) => {
     cardDenominations: String(process.env.CARD_DENOMINATIONS || '10000,20000,30000,50000,100000,200000,300000,500000,1000000').split(',').map(v => Number.parseInt(v.trim(), 10)).filter(v => Number.isInteger(v) && v > 0),
     cardDiscountPercent: 30,
     bankCreditPercent: 100,
-    pricing: { providerRateUnit: 'USD/1000', usdVndRate: Number(process.env.USD_VND_RATE || 27000), displayUnit: 'VND/1' }
+    pricing: { providerRateUnit: 'USD/1000', usdVndRate: Number(process.env.USD_VND_RATE || 27000), displayUnit: 'VND/1' }, telegramBotMode: String(process.env.TELEGRAM_BOT_MODE || 'polling').trim().toLowerCase()
   });
 });
 
@@ -340,7 +363,12 @@ async function configureTelegramWebhook() {
 if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`TDMS1VN API server listening on ${PORT}`);
-    configureTelegramWebhook();
+    const telegramMode = String(process.env.TELEGRAM_BOT_MODE || 'polling').trim().toLowerCase();
+    if (telegramMode === 'polling') {
+      startTelegramPolling(db, admin);
+    } else {
+      configureTelegramWebhook();
+    }
     const interval = Number(process.env.ORDER_SYNC_INTERVAL_MS || 300000);
     if (Number.isFinite(interval) && interval >= 60000) {
       setInterval(() => {

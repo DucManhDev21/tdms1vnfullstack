@@ -147,6 +147,70 @@ async function handleTelegramUpdate(update,db,admin){
   }
 }
 
+
+let telegramPollingStarted = false;
+let telegramPollingOffset = 0;
+
+async function telegramGetUpdates(offset) {
+  const token = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
+  if (!token) throw new Error('TELEGRAM_BOT_TOKEN is not configured');
+  const client = telegramClient();
+  const response = await client.post('/getUpdates', {
+    offset,
+    timeout: 25,
+    allowed_updates: ['callback_query']
+  }, { timeout: 35000 });
+  if (!response.data?.ok) throw new Error(response.data?.description || 'Telegram getUpdates failed');
+  return Array.isArray(response.data.result) ? response.data.result : [];
+}
+
+async function startTelegramPolling(db, admin) {
+  if (telegramPollingStarted) return;
+  if (String(process.env.TELEGRAM_BOT_MODE || 'polling').trim().toLowerCase() !== 'polling') return;
+  if (!String(process.env.TELEGRAM_BOT_TOKEN || '').trim()) {
+    console.error('Telegram polling disabled: TELEGRAM_BOT_TOKEN is not configured');
+    return;
+  }
+  telegramPollingStarted = true;
+  console.log('Telegram bot mode: LONG POLLING');
+  try {
+    // Polling and webhook cannot be active at the same time. Remove any stale
+    // webhook left by an older deployment so Approve/Reject callbacks always
+    // arrive at this running backend.
+    await telegram('deleteWebhook', { drop_pending_updates: false }).catch(error => {
+      console.error('Telegram deleteWebhook:', error.response?.data || error.message);
+    });
+
+    // Start after webhook deletion. Offset is initialized from the newest update
+    // so an old callback is not accidentally applied after a deployment restart.
+    const pending = await telegramGetUpdates(0).catch(() => []);
+    if (pending.length) telegramPollingOffset = pending[pending.length - 1].update_id + 1;
+
+    const loop = async () => {
+      while (telegramPollingStarted) {
+        try {
+          const updates = await telegramGetUpdates(telegramPollingOffset);
+          for (const update of updates) {
+            telegramPollingOffset = Number(update.update_id) + 1;
+            try {
+              await handleTelegramUpdate(update, db, admin);
+            } catch (error) {
+              console.error('Telegram update processing:', error);
+            }
+          }
+        } catch (error) {
+          console.error('Telegram polling:', error.response?.data || error.message);
+          await new Promise(resolve => setTimeout(resolve, 3000));
+        }
+      }
+    };
+    loop().catch(error => console.error('Telegram polling loop stopped:', error));
+  } catch (error) {
+    telegramPollingStarted = false;
+    console.error('Telegram polling startup failed:', error);
+  }
+}
+
 router.post('/telegram/webhook',(req,res)=>{
   const secret=String(process.env.TELEGRAM_WEBHOOK_SECRET||'').trim();
   if(secret&&req.get('X-Telegram-Bot-Api-Secret-Token')!==secret)return res.status(401).json({error:'Invalid secret'});
@@ -157,3 +221,4 @@ router.post('/telegram/webhook',(req,res)=>{
 
 module.exports=router;
 module.exports.grantDeposit=grantDeposit;
+module.exports.startTelegramPolling=startTelegramPolling;
