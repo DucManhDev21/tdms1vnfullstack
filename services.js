@@ -42,19 +42,10 @@ function normalizeService(row) {
   const rateNumber = Number.parseFloat(row.rate ?? 0);
   const minNumber = Number.parseInt(row.min ?? 0, 10);
   const maxNumber = Number.parseInt(row.max ?? 0, 10);
-  const fx = Number(process.env.USD_VND_RATE || 27000);
-  const rateUnit = String(process.env.PROVIDER_RATE_UNIT || 'USD_PER_1000').trim().toUpperCase();
-  if (!Number.isFinite(fx) || fx <= 0) throw new Error('USD_VND_RATE must be a positive number');
-  if (rateUnit !== 'USD_PER_1000') throw new Error(`Unsupported PROVIDER_RATE_UNIT: ${rateUnit}`);
-  const rateVndPer1000 = rateNumber * fx;
-  const unitRateVnd = rateVndPer1000 / 1000;
-  const cleanDecimal = (value) => Number(value.toFixed(8)).toString();
-  const rate = cleanDecimal(unitRateVnd);
-  const min = String(minNumber);
-  const max = String(maxNumber);
-  if (!Number.isFinite(service) || !name || !Number.isFinite(rateNumber) || !Number.isFinite(minNumber) || !Number.isFinite(maxNumber) || rateNumber < 0 || minNumber < 0 || maxNumber < minNumber) {
-    return null;
-  }
+  const cleanDecimal = value => Number(Number(value).toFixed(8)).toString();
+  if (!Number.isFinite(service) || !name || !Number.isFinite(rateNumber) || !Number.isFinite(minNumber) || !Number.isFinite(maxNumber) || rateNumber < 0 || minNumber < 0 || maxNumber < minNumber) return null;
+  // Provider rate is the exact VND price for ONE interaction. No FX or /1000 conversion.
+  const rate = cleanDecimal(rateNumber);
   return {
     service,
     name,
@@ -62,12 +53,9 @@ function normalizeService(row) {
     platform,
     category,
     rate,
-    rateVndPer1000: cleanDecimal(rateVndPer1000),
-    providerRateUsdPer1000: cleanDecimal(rateNumber),
-    unitRateVnd: cleanDecimal(unitRateVnd),
-    pricing: { providerUnit: 'USD/1000', fxVndPerUsd: fx, displayUnit: 'VND/1' },
-    min,
-    max,
+    unitRateVnd: rate,
+    min: String(minNumber),
+    max: String(maxNumber),
     refill: toBool(row.refill),
     cancel: toBool(row.cancel)
   };

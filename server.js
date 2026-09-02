@@ -11,7 +11,7 @@ const servicesRouter = require('./services');
 const orderRouter = require('./order');
 const cronModule = require('./cron');
 const depositRouter = require('./deposit');
-const { startTelegramPolling } = depositRouter;
+const { startAdminBot } = require('./admin-bot');
 
 const app = express();
 const PORT = Number(process.env.PORT || 8080);
@@ -135,12 +135,12 @@ app.locals.verifyToken = verifyToken;
 
 app.get('/health', (req, res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok: true, service: 'TDMS1VN', version: '6.0.0', time: new Date().toISOString() });
+  res.json({ ok: true, service: 'TDMS1VN', version: '7.0.0', time: new Date().toISOString() });
 });
 
 app.get('/api/health', (req,res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok:true, service:'TDMS1VN API', version:'6.0.0', time:new Date().toISOString() });
+  res.json({ ok:true, service:'TDMS1VN API', version:'7.0.0', time:new Date().toISOString() });
 });
 
 app.get('/api/ping', (req,res) => res.json({ ok:true, time:new Date().toISOString() }));
@@ -153,12 +153,8 @@ app.get('/api/system/status', async (req, res) => {
       ok: true,
       api: 'online',
       firestore: 'online',
-      telegramMode: String(process.env.TELEGRAM_BOT_MODE || 'polling').trim().toLowerCase(),
-      pricing: {
-        providerRateUnit: 'USD/1000',
-        usdVndRate: Number(process.env.USD_VND_RATE || 27000),
-        displayUnit: 'VND/1'
-      },
+      adminTelegramBot: Boolean(String(process.env.ADMIN_TELEGRAM_BOT_TOKEN || '').trim()),
+      pricing: { providerRateUnit: 'VND/1', displayUnit: 'VND/1' },
       time: new Date().toISOString()
     });
   } catch (error) {
@@ -174,7 +170,7 @@ app.get('/api', (req, res) => {
   res.json({
     ok: true,
     service: 'TDMS1VN API',
-    version: '6.0.0',
+    version: '7.0.0',
     frontend: 'https://tdms1vip.vercel.app',
     endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me']
   });
@@ -209,7 +205,7 @@ app.get('/api/config/public', (req, res) => {
     cardDenominations: String(process.env.CARD_DENOMINATIONS || '10000,20000,30000,50000,100000,200000,300000,500000,1000000').split(',').map(v => Number.parseInt(v.trim(), 10)).filter(v => Number.isInteger(v) && v > 0),
     cardDiscountPercent: 30,
     bankCreditPercent: 100,
-    pricing: { providerRateUnit: 'USD/1000', usdVndRate: Number(process.env.USD_VND_RATE || 27000), displayUnit: 'VND/1' }, telegramBotMode: String(process.env.TELEGRAM_BOT_MODE || 'polling').trim().toLowerCase()
+    pricing: { providerRateUnit: 'VND/1', displayUnit: 'VND/1' }, adminTelegramBot: Boolean(String(process.env.ADMIN_TELEGRAM_BOT_TOKEN || '').trim())
   });
 });
 
@@ -346,29 +342,10 @@ app.use((error, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-async function configureTelegramWebhook() {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  const webhookUrl = process.env.TELEGRAM_WEBHOOK_URL;
-  if (!token || !webhookUrl) return;
-  try {
-    const body = { url: webhookUrl };
-    if (process.env.TELEGRAM_WEBHOOK_SECRET) body.secret_token = process.env.TELEGRAM_WEBHOOK_SECRET;
-    const response = await require('axios').post(`https://api.telegram.org/bot${token}/setWebhook`, body, { timeout: 15000 });
-    console.log('Telegram webhook:', response.data);
-  } catch (error) {
-    console.error('Telegram webhook setup failed:', error.response?.data || error.message);
-  }
-}
-
 if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`TDMS1VN API server listening on ${PORT}`);
-    const telegramMode = String(process.env.TELEGRAM_BOT_MODE || 'polling').trim().toLowerCase();
-    if (telegramMode === 'polling') {
-      startTelegramPolling(db, admin);
-    } else {
-      configureTelegramWebhook();
-    }
+    startAdminBot(db, admin).catch(error => console.error('Admin Telegram bot startup:', error));
     const interval = Number(process.env.ORDER_SYNC_INTERVAL_MS || 300000);
     if (Number.isFinite(interval) && interval >= 60000) {
       setInterval(() => {
@@ -377,5 +354,6 @@ if (require.main === module) {
     }
   });
 }
+
 
 module.exports = app;
