@@ -135,12 +135,12 @@ app.locals.verifyToken = verifyToken;
 
 app.get('/health', (req, res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok: true, service: 'TDMS1VN', version: '7.2.0', time: new Date().toISOString() });
+  res.json({ ok: true, service: 'TDMS1VN', version: '7.3.0', time: new Date().toISOString() });
 });
 
 app.get('/api/health', (req,res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok:true, service:'TDMS1VN API', version:'7.0.0', time:new Date().toISOString() });
+  res.json({ ok:true, service:'TDMS1VN API', version:'7.3.0', time:new Date().toISOString() });
 });
 
 app.get('/api/ping', (req,res) => res.json({ ok:true, time:new Date().toISOString() }));
@@ -170,10 +170,43 @@ app.get('/api', (req, res) => {
   res.json({
     ok: true,
     service: 'TDMS1VN API',
-    version: '7.2.0',
+    version: '7.3.0',
     frontend: 'https://tdms1vip.vercel.app',
     endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me', '/api/admin/session']
   });
+});
+
+
+app.post('/api/admin/setup', verifyToken, async (req, res) => {
+  try {
+    const setupSecret = String(process.env.ADMIN_SETUP_SECRET || '').trim();
+    if (!setupSecret) return res.status(503).json({ ok:false, error:'ADMIN_SETUP_SECRET chưa được cấu hình trên Railway.' });
+    const provided = String(req.body?.secret || '').trim();
+    if (!provided || provided.length < 16 || provided !== setupSecret) {
+      return res.status(403).json({ ok:false, error:'Mã thiết lập Admin không đúng.' });
+    }
+    const setupRef = db.collection('system').doc('adminSetup');
+    const userRecord = await auth.getUser(req.user.uid);
+    if (!userRecord.email || String(userRecord.email).toLowerCase() !== String(req.body?.email || userRecord.email).trim().toLowerCase()) {
+      return res.status(400).json({ ok:false, error:'Gmail xác thực không khớp.' });
+    }
+    if (!userRecord.emailVerified) return res.status(403).json({ ok:false, error:'Hãy xác minh Gmail Admin trước khi thiết lập.' });
+    const result = await db.runTransaction(async tx => {
+      const snap = await tx.get(setupRef);
+      if (snap.exists && snap.data()?.completedAt) throw Object.assign(new Error('ADMIN_SETUP_LOCKED'), { code:'ADMIN_SETUP_LOCKED' });
+      tx.set(setupRef, { completedAt: admin.firestore.FieldValue.serverTimestamp(), uid:userRecord.uid, email:userRecord.email.toLowerCase(), version:'7.3.0' }, { merge:true });
+      return true;
+    });
+    if (result) {
+      await auth.setCustomUserClaims(userRecord.uid, { admin:true, role:'admin' });
+      await auth.revokeRefreshTokens(userRecord.uid);
+      return res.json({ ok:true, message:'Đã cấp quyền Admin. Hãy đăng nhập lại để nhận quyền mới.' });
+    }
+  } catch (error) {
+    if (error.code === 'ADMIN_SETUP_LOCKED') return res.status(409).json({ ok:false, error:'Trang thiết lập Admin đã được khóa sau lần tạo đầu tiên.' });
+    console.error('admin setup:', error);
+    return res.status(500).json({ ok:false, error:'Không thể thiết lập quyền Admin.' });
+  }
 });
 
 app.get('/api/admin/session', verifyToken, async (req, res) => {
