@@ -111,7 +111,7 @@ router.post('/', requireUser, async (req, res) => {
     if (parsedQuantity < min || parsedQuantity > max) {
       return res.status(400).json({ error: `Số lượng phải từ ${min} đến ${max}` });
     }
-    const rate = Number.parseFloat(service.rate);
+    const rate = Number.parseFloat(service.unitRateVnd ?? service.rate);
     if (!Number.isFinite(rate) || rate < 0) return res.status(400).json({ error: 'Giá dịch vụ không hợp lệ' });
     const totalPrice = Math.round((parsedQuantity * rate) * 10000) / 10000;
     if (!Number.isFinite(totalPrice) || totalPrice < 0) return res.status(400).json({ error: 'Giá dịch vụ không hợp lệ' });
@@ -144,6 +144,9 @@ router.post('/', requireUser, async (req, res) => {
         quantity: parsedQuantity,
         totalPrice,
         rate,
+        unitRateVnd: rate,
+        providerRate: service.providerRate ?? null,
+        providerRateMode: service.providerRateMode ?? null,
         providerOrderId: '',
         status: 'Pending',
         remains: parsedQuantity,

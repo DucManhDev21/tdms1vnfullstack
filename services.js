@@ -43,13 +43,22 @@ function normalizeService(row) {
   const minNumber = Number.parseInt(row.min ?? 0, 10);
   const maxNumber = Number.parseInt(row.max ?? 0, 10);
   const cleanDecimal = value => Number(Number(value).toFixed(8)).toString();
+  const requestedMode = String(process.env.PROVIDER_RATE_MODE || 'USD_PER_1000').trim().toUpperCase();
+  const mode = ['USD_PER_1000','VND_PER_1000','VND_PER_1'].includes(requestedMode) ? requestedMode : 'USD_PER_1000';
   if (!Number.isFinite(service) || !name || !Number.isFinite(rateNumber) || !Number.isFinite(minNumber) || !Number.isFinite(maxNumber) || rateNumber < 0 || minNumber < 0 || maxNumber < minNumber) return null;
-  // Provider API returns price per 1,000 interactions. Convert to exact VND price per 1 interaction.
-  // Example: 0.25 USD/1000 × 27,000 VND/USD ÷ 1000 = 6.75 VND/interaction.
-  // Some provider panels return 250 for the same $0.25/1000 value; normalize that form too.
   const usdVnd = Number(process.env.USD_VND_RATE || 27000);
-  const providerRatePer1000 = rateNumber >= 10 ? rateNumber / 1000 : rateNumber;
-  const rate = cleanDecimal(providerRatePer1000 * usdVnd / 1000);
+  if (!Number.isFinite(usdVnd) || usdVnd <= 0) throw new Error('USD_VND_RATE is invalid');
+  let rate;
+  if (mode === 'VND_PER_1') {
+    rate = cleanDecimal(rateNumber);
+  } else if (mode === 'VND_PER_1000') {
+    rate = cleanDecimal(rateNumber / 1000);
+  } else {
+    // Default/provider mode: USD per 1,000. Some panels serialize $0.25 as 250;
+    // the two representations are equivalent, so normalize the scaled form.
+    const providerUsdPer1000 = rateNumber >= 10 ? rateNumber / 1000 : rateNumber;
+    rate = cleanDecimal(providerUsdPer1000 * usdVnd / 1000);
+  }
   return {
     service,
     name,
@@ -58,6 +67,8 @@ function normalizeService(row) {
     category,
     rate,
     unitRateVnd: rate,
+    providerRate: cleanDecimal(rateNumber),
+    providerRateMode: mode,
     min: String(minNumber),
     max: String(maxNumber),
     refill: toBool(row.refill),
@@ -123,3 +134,4 @@ router.get('/:serviceId', async (req, res) => {
 
 module.exports = router;
 module.exports.getServices = getServices;
+module.exports.normalizeService = normalizeService;

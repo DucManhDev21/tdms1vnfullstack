@@ -135,7 +135,7 @@ app.locals.verifyToken = verifyToken;
 
 app.get('/health', (req, res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok: true, service: 'TDMS1VN', version: '7.0.0', time: new Date().toISOString() });
+  res.json({ ok: true, service: 'TDMS1VN', version: '7.2.0', time: new Date().toISOString() });
 });
 
 app.get('/api/health', (req,res) => {
@@ -154,7 +154,7 @@ app.get('/api/system/status', async (req, res) => {
       api: 'online',
       firestore: 'online',
       adminTelegramBot: Boolean(String(process.env.ADMIN_TELEGRAM_BOT_TOKEN || '').trim()),
-      pricing: { providerRateUnit: 'VND/1', displayUnit: 'VND/1' },
+      pricing: { providerRateMode: process.env.PROVIDER_RATE_MODE || 'USD_PER_1000', displayUnit: 'VND/1' },
       time: new Date().toISOString()
     });
   } catch (error) {
@@ -170,10 +170,26 @@ app.get('/api', (req, res) => {
   res.json({
     ok: true,
     service: 'TDMS1VN API',
-    version: '7.0.0',
+    version: '7.2.0',
     frontend: 'https://tdms1vip.vercel.app',
-    endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me']
+    endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me', '/api/admin/session']
   });
+});
+
+app.get('/api/admin/session', verifyToken, async (req, res) => {
+  try {
+    const token = req.user || {};
+    const isAdmin = token.admin === true || token.role === 'admin';
+    if (!isAdmin) return res.status(403).json({ ok:false, error:'Bạn không có quyền truy cập khu vực Admin.' });
+    const userRecord = await auth.getUser(token.uid);
+    if (!userRecord.emailVerified) return res.status(403).json({ ok:false, error:'Gmail Admin chưa được xác minh.' });
+    if (userRecord.disabled) return res.status(403).json({ ok:false, error:'Tài khoản Admin đã bị vô hiệu hóa.' });
+    res.set('Cache-Control','no-store');
+    res.json({ ok:true, admin:true, uid:userRecord.uid, email:userRecord.email || '', claims:{admin:true, role:token.role || 'admin'} });
+  } catch (error) {
+    console.error('admin session:', error);
+    res.status(403).json({ ok:false, error:'Không thể xác thực phiên Admin.' });
+  }
 });
 
 app.get('/api/public/stats', async (req, res) => {
@@ -205,7 +221,7 @@ app.get('/api/config/public', (req, res) => {
     cardDenominations: String(process.env.CARD_DENOMINATIONS || '10000,20000,30000,50000,100000,200000,300000,500000,1000000').split(',').map(v => Number.parseInt(v.trim(), 10)).filter(v => Number.isInteger(v) && v > 0),
     cardDiscountPercent: 30,
     bankCreditPercent: 100,
-    pricing: { providerRateUnit: 'VND/1', displayUnit: 'VND/1' }, adminTelegramBot: Boolean(String(process.env.ADMIN_TELEGRAM_BOT_TOKEN || '').trim())
+    pricing: { providerRateMode: process.env.PROVIDER_RATE_MODE || 'USD_PER_1000', displayUnit: 'VND/1' }, adminTelegramBot: Boolean(String(process.env.ADMIN_TELEGRAM_BOT_TOKEN || '').trim())
   });
 });
 

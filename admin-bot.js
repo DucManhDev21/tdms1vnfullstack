@@ -21,8 +21,9 @@ function isAuthorized(update) {
   const senderId = String(message?.from?.id || '');
   const users = configuredUsers();
   const chat = configuredChat();
-  if (users.length) return users.includes(senderId);
-  return Boolean(chat && chatId === chat);
+  if (users.length && !users.includes(senderId)) return false;
+  if (chat && chatId !== chat) return false;
+  return users.length > 0 || Boolean(chat);
 }
 async function telegram(method, payload) {
   const response = await client().post(`/${method}`, payload);
@@ -36,6 +37,15 @@ function parsePay(text) {
   if (p.length !== 3) throw new Error('Cú pháp: /pay username số_tiền');
   const username = p[1].replace(/^@/,'').trim();
   const amount = Number(p[2].replace(/[.,_\s]/g,''));
+  if (!username || username.length > 64) throw new Error('Username không hợp lệ.');
+  if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000000) throw new Error('Số tiền phải lớn hơn 0 và tối đa 1.000.000.000đ.');
+  return { username, amount: Math.round(amount * 100) / 100 };
+}
+function parseTake(text) {
+  const p = String(text || '').trim().split(/\s+/);
+  if (p.length !== 3) throw new Error('Cú pháp: /take username số_tiền');
+  const username = p[1].replace(/^@/, '').trim();
+  const amount = Number(p[2].replace(/[.,_\s]/g, ''));
   if (!username || username.length > 64) throw new Error('Username không hợp lệ.');
   if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000000) throw new Error('Số tiền phải lớn hơn 0 và tối đa 1.000.000.000đ.');
   return { username, amount: Math.round(amount * 100) / 100 };
@@ -95,6 +105,23 @@ async function pay(db, admin, username, amount) {
     return { uid:user.uid, email:String(data.email||''), username:String(data.username||username), oldBalance, newBalance, amount };
   });
 }
+async function take(db, admin, username, amount) {
+  const user = await findUserByUsername(db, username);
+  return db.runTransaction(async tx => {
+    const snap = await tx.get(user.ref);
+    if (!snap.exists) throw new Error('Tài khoản không tồn tại.');
+    const data = snap.data() || {};
+    const rawBalance = data.balance == null || data.balance === '' ? 0 : Number(data.balance);
+    if (!Number.isFinite(rawBalance) || rawBalance < 0) throw new Error('Số dư hiện tại không hợp lệ.');
+    const oldBalance = Math.round(rawBalance * 100) / 100;
+    if (oldBalance < amount) throw new Error(`Số dư @${username} không đủ. Hiện có ${money(oldBalance)}, cần trừ ${money(amount)}.`);
+    const newBalance = Math.round((oldBalance - amount) * 100) / 100;
+    const logRef = db.collection('balance_logs').doc();
+    tx.update(user.ref, { balance: newBalance, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+    tx.set(logRef, { uid: user.uid, amount: -amount, type: 'debit', reason: 'Admin Telegram /take', oldBalance, newBalance, adminAction: 'telegram_take', adminUsername: username, createdAt: admin.firestore.FieldValue.serverTimestamp() });
+    return { uid:user.uid, email:String(data.email||''), username:String(data.username||username), oldBalance, newBalance, amount };
+  });
+}
 async function addPopup(db, admin, data) {
   const ref = db.collection('popups').doc(data.id);
   await db.runTransaction(async tx => {
@@ -108,13 +135,14 @@ async function deletePopup(db,id) {
   await db.runTransaction(async tx=>{const snap=await tx.get(ref);if(!snap.exists)throw new Error(`Không tìm thấy popup ${id}.`);tx.delete(ref);});
 }
 async function sendHelp(chatId) {
-  return telegram('sendMessage',{chat_id:chatId,text:'<b>TDMS1VN ADMIN BOT</b>\n\n/pay username số_tiền\n/addpopup ID | Tiêu đề | Nội dung\n/deletepopup ID\n/help\n\nVí dụ:\n/pay hung123 50000\n/addpopup TB1 | Khuyến mãi | Nội dung thông báo\n/deletepopup TB1',parse_mode:'HTML'});
+  return telegram('sendMessage',{chat_id:chatId,text:'<b>TDMS1VN ADMIN BOT</b>\n\n/pay username số_tiền\n/take username số_tiền\n/addpopup ID | Tiêu đề | Nội dung\n/deletepopup ID\n/help\n\nVí dụ:\n/pay hung123 50000\n/take hung123 50000\n/addpopup TB1 | Khuyến mãi | Nội dung thông báo\n/deletepopup TB1',parse_mode:'HTML'});
 }
 async function handleMessage(message,db,admin) {
   const chatId=String(message?.chat?.id||''); const text=String(message?.text||'').trim(); if(!text.startsWith('/'))return;
   const command=text.split(/\s+/)[0].split('@')[0].toLowerCase();
   if(command==='/start'||command==='/help')return sendHelp(chatId);
   if(command==='/pay'){const {username,amount}=parsePay(text);const r=await pay(db,admin,username,amount);return telegram('sendMessage',{chat_id:chatId,text:`✅ <b>CỘNG TIỀN THÀNH CÔNG</b>\n\n👤 Username: <code>@${esc(r.username)}</code>\n📧 Gmail: <code>${esc(r.email||'—')}</code>\n💰 Cộng: <b>${money(r.amount)}</b>\n💳 Số dư cũ: ${money(r.oldBalance)}\n💳 Số dư mới: <b>${money(r.newBalance)}</b>`,parse_mode:'HTML'});}
+  if(command==='/take'){const {username,amount}=parseTake(text);const r=await take(db,admin,username,amount);return telegram('sendMessage',{chat_id:chatId,text:`✅ <b>TRỪ TIỀN THÀNH CÔNG</b>\n\n👤 Username: <code>@${esc(r.username)}</code>\n📧 Gmail: <code>${esc(r.email||'—')}</code>\n💸 Trừ: <b>${money(r.amount)}</b>\n💳 Số dư cũ: ${money(r.oldBalance)}\n💳 Số dư mới: <b>${money(r.newBalance)}</b>`,parse_mode:'HTML'});}
   if(command==='/addpopup'){const data=parseAddPopup(text);await addPopup(db,admin,data);return telegram('sendMessage',{chat_id:chatId,text:`✅ <b>ĐÃ THÊM POPUP</b>\n\n🆔 ID: <code>${esc(data.id)}</code>\n📌 Tiêu đề: <b>${esc(data.title)}</b>\n📝 Nội dung: ${esc(data.content)}`,parse_mode:'HTML'});}
   if(command==='/deletepopup'){const id=parseDeletePopup(text);await deletePopup(db,id);return telegram('sendMessage',{chat_id:chatId,text:`🗑️ Đã xóa popup <code>${esc(id)}</code>.`,parse_mode:'HTML'});}
   return sendHelp(chatId);
@@ -131,8 +159,17 @@ async function startAdminBot(db,admin){
     offset=0;
     while(started){
       try{const updates=await telegram('getUpdates',{offset,timeout:25,allowed_updates:['message']});for(const u of updates||[]){offset=Number(u.update_id)+1;await handleUpdate(u,db,admin);}}
-      catch(error){console.error('Admin Telegram polling:',error.response?.data||error.message);await new Promise(r=>setTimeout(r,3000));}
+      catch(error){
+        const telegramError = error.response?.data || {};
+        console.error('Admin Telegram polling:', telegramError.description || error.message);
+        if (Number(telegramError.error_code) === 409) {
+          console.error('Admin Telegram bot stopped: this token is already being polled by another process.');
+          started = false;
+          break;
+        }
+        await new Promise(r=>setTimeout(r,3000));
+      }
     }
   }catch(error){started=false;console.error('Admin Telegram startup failed:',error.response?.data||error.message);}
 }
-module.exports={startAdminBot,parsePay,parseAddPopup,parseDeletePopup};
+module.exports={startAdminBot,parsePay,parseTake,parseAddPopup,parseDeletePopup};
