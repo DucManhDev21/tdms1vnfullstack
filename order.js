@@ -113,7 +113,7 @@ router.post('/', requireUser, async (req, res) => {
     }
     const rate = Number.parseFloat(service.rate);
     if (!Number.isFinite(rate) || rate < 0) return res.status(400).json({ error: 'Giá dịch vụ không hợp lệ' });
-    const totalPrice = parsedQuantity * rate;
+    const totalPrice = Math.round((parsedQuantity * rate) * 10000) / 10000;
     if (!Number.isFinite(totalPrice) || totalPrice < 0) return res.status(400).json({ error: 'Giá dịch vụ không hợp lệ' });
 
     const idemRef = db.collection('order_requests').doc(`${uid}_${idem.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 80)}`);

@@ -44,8 +44,12 @@ function normalizeService(row) {
   const maxNumber = Number.parseInt(row.max ?? 0, 10);
   const cleanDecimal = value => Number(Number(value).toFixed(8)).toString();
   if (!Number.isFinite(service) || !name || !Number.isFinite(rateNumber) || !Number.isFinite(minNumber) || !Number.isFinite(maxNumber) || rateNumber < 0 || minNumber < 0 || maxNumber < minNumber) return null;
-  // Provider rate is the exact VND price for ONE interaction. No FX or /1000 conversion.
-  const rate = cleanDecimal(rateNumber);
+  // Provider API returns price per 1,000 interactions. Convert to exact VND price per 1 interaction.
+  // Example: 0.25 USD/1000 × 27,000 VND/USD ÷ 1000 = 6.75 VND/interaction.
+  // Some provider panels return 250 for the same $0.25/1000 value; normalize that form too.
+  const usdVnd = Number(process.env.USD_VND_RATE || 27000);
+  const providerRatePer1000 = rateNumber >= 10 ? rateNumber / 1000 : rateNumber;
+  const rate = cleanDecimal(providerRatePer1000 * usdVnd / 1000);
   return {
     service,
     name,
