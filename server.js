@@ -90,7 +90,6 @@ app.use(cors({
   maxAge: 86400
 }));
 
-app.use('/api/deposits/gateway/callback', express.raw({ type: '*/*', limit: '256kb' }));
 app.use(express.json({ limit: '256kb' }));
 app.use(express.urlencoded({ extended: false, limit: '256kb' }));
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
@@ -134,8 +133,16 @@ async function verifyToken(req, res, next) {
 app.locals.verifyToken = verifyToken;
 
 app.get('/health', (req, res) => {
-  res.json({ ok: true, service: 'TDMS1VN', time: new Date().toISOString() });
+  res.set('Cache-Control','no-store');
+  res.json({ ok: true, service: 'TDMS1VN', version: '5.0.0', time: new Date().toISOString() });
 });
+
+app.get('/api/health', (req,res) => {
+  res.set('Cache-Control','no-store');
+  res.json({ ok:true, service:'TDMS1VN API', version:'5.0.0', time:new Date().toISOString() });
+});
+
+app.get('/api/ping', (req,res) => res.json({ ok:true, time:new Date().toISOString() }));
 
 // API root must be a real API response. The old server tried to serve
 // /public/index.html here, but the Railway backend repository does not contain
@@ -144,7 +151,7 @@ app.get('/api', (req, res) => {
   res.json({
     ok: true,
     service: 'TDMS1VN API',
-    version: '2.1.0',
+    version: '5.0.0',
     frontend: 'https://tdms1vip.vercel.app',
     endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me']
   });
