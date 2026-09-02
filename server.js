@@ -186,7 +186,7 @@ app.post('/api/admin/setup', verifyToken, async (req, res) => {
       return res.status(403).json({ ok:false, error:'Mã thiết lập Admin không đúng.' });
     }
     const setupRef = db.collection('system').doc('adminSetup');
-    const userRecord = await auth.getUser(req.user.uid);
+    let userRecord = await auth.getUser(req.user.uid);
     if (!userRecord.email || String(userRecord.email).toLowerCase() !== String(req.body?.email || userRecord.email).trim().toLowerCase()) {
       return res.status(400).json({ ok:false, error:'Gmail xác thực không khớp.' });
     }
