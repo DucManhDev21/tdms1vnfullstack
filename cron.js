@@ -95,7 +95,7 @@ async function syncOrders(req, res) {
       try {
         const provider = await providerStatus(order.providerOrderId);
         const service = serviceMap.get(String(order.serviceId));
-        const fallbackRate = Number(service?.rate ?? order.rate ?? (Number(order.totalPrice || 0) / Math.max(1, Number(order.quantity || 1))));
+        const fallbackRate = Number(service?.unitRateVnd ?? service?.rate ?? order.rate ?? (Number(order.totalPrice || 0) / Math.max(1, Number(order.quantity || 1))));
         const remains = Number.isFinite(provider.remains) ? Math.max(0, provider.remains) : Number(order.remains || 0);
         if ((provider.status === 'Canceled' || provider.status === 'Partial') && !order.refundSettledAt) {
           await applyPartialRefund(db, admin, doc, provider.status, remains);
@@ -154,7 +154,7 @@ async function runScheduledSync(db, admin) {
       try {
         const provider = await providerStatus(order.providerOrderId);
         const service = serviceMap.get(String(order.serviceId));
-        const fallbackRate = Number(service?.rate ?? order.rate ?? (Number(order.totalPrice || 0) / Math.max(1, Number(order.quantity || 1))));
+        const fallbackRate = Number(service?.unitRateVnd ?? service?.rate ?? order.rate ?? (Number(order.totalPrice || 0) / Math.max(1, Number(order.quantity || 1))));
         const remains = Number.isFinite(provider.remains) ? Math.max(0, provider.remains) : Number(order.remains || 0);
         if ((provider.status === 'Canceled' || provider.status === 'Partial') && !order.refundSettledAt) {
           await applyPartialRefund(db, admin, doc, provider.status, remains);

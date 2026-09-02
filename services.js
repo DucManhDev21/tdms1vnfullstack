@@ -42,7 +42,11 @@ function normalizeService(row) {
   const rateNumber = Number.parseFloat(row.rate ?? 0);
   const minNumber = Number.parseInt(row.min ?? 0, 10);
   const maxNumber = Number.parseInt(row.max ?? 0, 10);
-  const rate = String(rateNumber);
+  const fx = Number(process.env.USD_VND_RATE || 27000);
+  if (!Number.isFinite(fx) || fx <= 0) throw new Error('USD_VND_RATE must be a positive number');
+  const rateVndPer1000 = rateNumber * fx;
+  const unitRateVnd = rateVndPer1000 / 1000;
+  const rate = String(unitRateVnd);
   const min = String(minNumber);
   const max = String(maxNumber);
   if (!Number.isFinite(service) || !name || !Number.isFinite(rateNumber) || !Number.isFinite(minNumber) || !Number.isFinite(maxNumber) || rateNumber < 0 || minNumber < 0 || maxNumber < minNumber) {
@@ -55,6 +59,9 @@ function normalizeService(row) {
     platform,
     category,
     rate,
+    rateVndPer1000: String(rateVndPer1000),
+    providerRateUsdPer1000: String(rateNumber),
+    unitRateVnd: String(unitRateVnd),
     min,
     max,
     refill: toBool(row.refill),

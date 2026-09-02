@@ -90,6 +90,7 @@ app.use(cors({
   maxAge: 86400
 }));
 
+app.use('/api/deposits/gateway/callback', express.raw({ type: '*/*', limit: '256kb' }));
 app.use(express.json({ limit: '256kb' }));
 app.use(express.urlencoded({ extended: false, limit: '256kb' }));
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
@@ -173,7 +174,12 @@ app.get('/api/config/public', (req, res) => {
       accountName: process.env.BANK_ACCOUNT_NAME || '',
       qrTemplate: process.env.BANK_QR_TEMPLATE || 'compact2'
     },
-    currency: process.env.CURRENCY || 'VND'
+    currency: process.env.CURRENCY || 'VND',
+    cardTypes: String(process.env.CARD_TYPES || 'Viettel,Vinaphone,Mobifone,Vietnamobile,Zing,Gate,Garena').split(',').map(v => v.trim()).filter(Boolean),
+    cardDenominations: String(process.env.CARD_DENOMINATIONS || '10000,20000,30000,50000,100000,200000,300000,500000,1000000').split(',').map(v => Number.parseInt(v.trim(), 10)).filter(v => Number.isInteger(v) && v > 0),
+    cardDiscountPercent: 30,
+    bankCreditPercent: 100,
+    pricing: { providerRateUnit: 'USD/1000', usdVndRate: Number(process.env.USD_VND_RATE || 27000), displayUnit: 'VND/1' }
   });
 });
 
@@ -181,6 +187,50 @@ app.use('/api/services', servicesRouter);
 app.use('/api/orders', orderRouter);
 app.use('/api/cron', cronModule);
 app.use('/api/deposits', depositRouter);
+
+app.post('/api/account/profile', verifyToken, async (req, res) => {
+  const uid = req.user.uid;
+  const username = String(req.body?.username || '').trim();
+  if (!/^[a-zA-Z0-9_]{3,24}$/.test(username)) {
+    return res.status(400).json({ error: 'Username phải 3-24 ký tự, chỉ gồm chữ, số và dấu gạch dưới' });
+  }
+  const key = username.toLowerCase();
+  try {
+    await db.runTransaction(async tx => {
+      const userRef = db.collection('users').doc(uid);
+      const usernameRef = db.collection('usernames').doc(key);
+      const userSnap = await tx.get(userRef);
+      const usernameSnap = await tx.get(usernameRef);
+      if (usernameSnap.exists && String(usernameSnap.data()?.uid || '') !== uid) {
+        throw Object.assign(new Error('Username đã được sử dụng'), { code: 'USERNAME_TAKEN' });
+      }
+      const oldUsername = String(userSnap.data()?.username || '').trim();
+      if (oldUsername && oldUsername.toLowerCase() !== key) {
+        const oldRef = db.collection('usernames').doc(oldUsername.toLowerCase());
+        const oldSnap = await tx.get(oldRef);
+        if (oldSnap.exists && String(oldSnap.data()?.uid || '') === uid) tx.delete(oldRef);
+      }
+      tx.set(usernameRef, { uid, username, email: req.user.email || '', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      tx.set(userRef, { uid, email: req.user.email || '', username, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    });
+    res.json({ ok: true, username });
+  } catch (error) {
+    if (error.code === 'USERNAME_TAKEN') return res.status(409).json({ error: error.message });
+    console.error('profile:', error);
+    res.status(500).json({ error: 'Không thể lưu username' });
+  }
+});
+
+app.get('/api/account/profile', verifyToken, async (req, res) => {
+  try {
+    const snap = await db.collection('users').doc(req.user.uid).get();
+    const user = snap.exists ? snap.data() : { uid: req.user.uid, email: req.user.email || '', balance: 0 };
+    res.json({ uid: req.user.uid, user });
+  } catch (error) {
+    console.error('profile get:', error);
+    res.status(500).json({ error: 'Không thể lấy thông tin tài khoản' });
+  }
+});
 
 app.get('/api/balance-logs', verifyToken, async (req, res) => {
   try {
@@ -219,9 +269,24 @@ app.use((error, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
+async function configureTelegramWebhook() {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const webhookUrl = process.env.TELEGRAM_WEBHOOK_URL;
+  if (!token || !webhookUrl) return;
+  try {
+    const body = { url: webhookUrl };
+    if (process.env.TELEGRAM_WEBHOOK_SECRET) body.secret_token = process.env.TELEGRAM_WEBHOOK_SECRET;
+    const response = await require('axios').post(`https://api.telegram.org/bot${token}/setWebhook`, body, { timeout: 15000 });
+    console.log('Telegram webhook:', response.data);
+  } catch (error) {
+    console.error('Telegram webhook setup failed:', error.response?.data || error.message);
+  }
+}
+
 if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`TDMS1VN API server listening on ${PORT}`);
+    configureTelegramWebhook();
     const interval = Number(process.env.ORDER_SYNC_INTERVAL_MS || 300000);
     if (Number.isFinite(interval) && interval >= 60000) {
       setInterval(() => {
