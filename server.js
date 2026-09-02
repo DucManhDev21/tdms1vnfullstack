@@ -221,6 +221,53 @@ app.post('/api/account/profile', verifyToken, async (req, res) => {
   }
 });
 
+
+// Compatibility aliases: some older frontend deployments requested /account/profile
+// directly. Keep them available while the canonical API remains /api/account/profile.
+app.post('/account/profile', verifyToken, async (req, res) => {
+  const uid = req.user.uid;
+  const username = String(req.body?.username || '').trim();
+  if (!/^[a-zA-Z0-9_]{3,24}$/.test(username)) {
+    return res.status(400).json({ error: 'Username phải 3-24 ký tự, chỉ gồm chữ, số và dấu gạch dưới' });
+  }
+  const key = username.toLowerCase();
+  try {
+    await db.runTransaction(async tx => {
+      const userRef = db.collection('users').doc(uid);
+      const usernameRef = db.collection('usernames').doc(key);
+      const userSnap = await tx.get(userRef);
+      const usernameSnap = await tx.get(usernameRef);
+      if (usernameSnap.exists && String(usernameSnap.data()?.uid || '') !== uid) {
+        throw Object.assign(new Error('Username đã được sử dụng'), { code: 'USERNAME_TAKEN' });
+      }
+      const oldUsername = String(userSnap.data()?.username || '').trim();
+      if (oldUsername && oldUsername.toLowerCase() !== key) {
+        const oldRef = db.collection('usernames').doc(oldUsername.toLowerCase());
+        const oldSnap = await tx.get(oldRef);
+        if (oldSnap.exists && String(oldSnap.data()?.uid || '') === uid) tx.delete(oldRef);
+      }
+      tx.set(usernameRef, { uid, username, email: req.user.email || '', updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      tx.set(userRef, { uid, email: req.user.email || '', username, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    });
+    res.json({ ok: true, username });
+  } catch (error) {
+    if (error.code === 'USERNAME_TAKEN') return res.status(409).json({ error: error.message });
+    console.error('profile alias:', error);
+    res.status(500).json({ error: 'Không thể lưu username' });
+  }
+});
+
+app.get('/account/profile', verifyToken, async (req, res) => {
+  try {
+    const snap = await db.collection('users').doc(req.user.uid).get();
+    const user = snap.exists ? snap.data() : { uid: req.user.uid, email: req.user.email || '', balance: 0 };
+    res.json({ uid: req.user.uid, user });
+  } catch (error) {
+    console.error('profile alias get:', error);
+    res.status(500).json({ error: 'Không thể lấy thông tin tài khoản' });
+  }
+});
+
 app.get('/api/account/profile', verifyToken, async (req, res) => {
   try {
     const snap = await db.collection('users').doc(req.user.uid).get();
