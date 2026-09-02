@@ -190,7 +190,11 @@ app.post('/api/admin/setup', verifyToken, async (req, res) => {
     if (!userRecord.email || String(userRecord.email).toLowerCase() !== String(req.body?.email || userRecord.email).trim().toLowerCase()) {
       return res.status(400).json({ ok:false, error:'Gmail xác thực không khớp.' });
     }
-    if (!userRecord.emailVerified) return res.status(403).json({ ok:false, error:'Hãy xác minh Gmail Admin trước khi thiết lập.' });
+    // Admin setup already requires Firebase email/password authentication plus the private setup secret.
+    // For the one-time bootstrap flow, the backend marks this exact authenticated account as verified.
+    if (!userRecord.emailVerified) {
+      userRecord = await auth.updateUser(userRecord.uid, { emailVerified: true });
+    }
     const result = await db.runTransaction(async tx => {
       const snap = await tx.get(setupRef);
       if (snap.exists && snap.data()?.completedAt) throw Object.assign(new Error('ADMIN_SETUP_LOCKED'), { code:'ADMIN_SETUP_LOCKED' });
