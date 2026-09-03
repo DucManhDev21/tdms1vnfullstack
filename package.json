@@ -1,6 +1,6 @@
 {
   "name": "tdms1vn-backend",
-  "version": "7.3.0",
+  "version": "7.6.0",
   "private": true,
   "main": "server.js",
   "scripts": {

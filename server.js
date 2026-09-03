@@ -135,12 +135,12 @@ app.locals.verifyToken = verifyToken;
 
 app.get('/health', (req, res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok: true, service: 'TDMS1VN', version: '7.5.0', time: new Date().toISOString() });
+  res.json({ ok: true, service: 'TDMS1VN', version: '7.6.0', time: new Date().toISOString() });
 });
 
 app.get('/api/health', (req,res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok:true, service:'TDMS1VN API', version:'7.5.0', time:new Date().toISOString() });
+  res.json({ ok:true, service:'TDMS1VN API', version:'7.6.0', time:new Date().toISOString() });
 });
 
 app.get('/api/ping', (req,res) => res.json({ ok:true, time:new Date().toISOString() }));
@@ -170,7 +170,7 @@ app.get('/api', (req, res) => {
   res.json({
     ok: true,
     service: 'TDMS1VN API',
-    version: '7.5.0',
+    version: '7.6.0',
     frontend: 'https://tdms1vip.vercel.app',
     endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me', '/api/admin/session']
   });
@@ -203,7 +203,7 @@ app.post('/api/admin/setup', verifyToken, async (req, res) => {
     const result = await db.runTransaction(async tx => {
       const snap = await tx.get(setupRef);
       if (snap.exists && snap.data()?.completedAt) throw Object.assign(new Error('ADMIN_SETUP_LOCKED'), { code:'ADMIN_SETUP_LOCKED' });
-      tx.set(setupRef, { completedAt: admin.firestore.FieldValue.serverTimestamp(), uid:userRecord.uid, email:userRecord.email.toLowerCase(), version:'7.5.0' }, { merge:true });
+      tx.set(setupRef, { completedAt: admin.firestore.FieldValue.serverTimestamp(), uid:userRecord.uid, email:userRecord.email.toLowerCase(), version:'7.6.0' }, { merge:true });
       return true;
     });
     if (result) {
@@ -224,10 +224,8 @@ app.get('/api/admin/session', verifyToken, async (req, res) => {
     const isAdmin = token.admin === true || token.role === 'admin';
     if (!isAdmin) return res.status(403).json({ ok:false, error:'Bạn không có quyền truy cập khu vực Admin.' });
     const userRecord = await auth.getUser(token.uid);
-    const adminEmail = String(process.env.ADMIN_EMAIL || '').trim().toLowerCase();
-    if (adminEmail && String(userRecord.email || '').trim().toLowerCase() !== adminEmail) return res.status(403).json({ ok:false, error:'Email Admin không khớp cấu hình Railway.' });
-    if (!userRecord.emailVerified) return res.status(403).json({ ok:false, error:'Gmail Admin chưa được xác minh.' });
     if (userRecord.disabled) return res.status(403).json({ ok:false, error:'Tài khoản Admin đã bị vô hiệu hóa.' });
+    if (!userRecord.emailVerified) return res.status(403).json({ ok:false, error:'Gmail Admin chưa được xác minh.' });
     res.set('Cache-Control','no-store');
     res.json({ ok:true, admin:true, uid:userRecord.uid, email:userRecord.email || '', claims:{admin:true, role:token.role || 'admin'} });
   } catch (error) {
