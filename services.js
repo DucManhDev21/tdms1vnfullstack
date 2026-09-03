@@ -1,20 +1,18 @@
 const express = require('express');
 const axios = require('axios');
-
 const router = express.Router();
+const { applyPricing, defaultMarkupPercent, getPricingOverrides, roundMoney } = require('./pricing');
+
 const CACHE_MS = Number(process.env.SERVICE_CACHE_MS || 5 * 60 * 1000);
 let cachedServices = null;
 let cachedAt = 0;
+let refreshPromise = null;
 
 function providerClient() {
-  const baseURL = process.env.PROVIDER_API_URL;
-  const key = process.env.PROVIDER_API_KEY;
+  const baseURL = String(process.env.PROVIDER_API_URL || '').trim();
+  const key = String(process.env.PROVIDER_API_KEY || '').trim();
   if (!baseURL || !key) throw new Error('Provider API is not configured');
-  return axios.create({
-    baseURL,
-    timeout: Number(process.env.PROVIDER_TIMEOUT_MS || 20000),
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-  });
+  return axios.create({ baseURL, timeout: Number(process.env.PROVIDER_TIMEOUT_MS || 20000) });
 }
 
 function detectPlatform(name, category, raw) {
@@ -25,7 +23,7 @@ function detectPlatform(name, category, raw) {
   if (text.includes('youtube') || text.includes('yt')) return 'Youtube';
   if (text.includes('telegram') || text.includes('tele')) return 'Telegram';
   if (text.includes('shopee')) return 'Shopee';
-  return 'Facebook';
+  return 'Khác';
 }
 
 function toBool(value) {
@@ -36,82 +34,122 @@ function toBool(value) {
 function normalizeService(row) {
   const service = Number(row.service ?? row.id);
   const name = String(row.name ?? '').trim();
-  const category = String(row.category ?? row.type ?? 'Khác').trim();
+  const category = String(row.category ?? row.type ?? 'Khác').trim() || 'Khác';
   const platform = detectPlatform(name, category, row);
   const type = String(row.type ?? 'Default').trim() || 'Default';
   const rateNumber = Number.parseFloat(row.rate ?? 0);
   const minNumber = Number.parseInt(row.min ?? 0, 10);
   const maxNumber = Number.parseInt(row.max ?? 0, 10);
-  const cleanDecimal = value => Number(Number(value).toFixed(8)).toString();
-  const requestedMode = String(process.env.PROVIDER_RATE_MODE || 'USD_PER_1000').trim().toUpperCase();
-  const mode = ['USD_PER_1000','VND_PER_1000','VND_PER_1'].includes(requestedMode) ? requestedMode : 'USD_PER_1000';
-  if (!Number.isFinite(service) || !name || !Number.isFinite(rateNumber) || !Number.isFinite(minNumber) || !Number.isFinite(maxNumber) || rateNumber < 0 || minNumber < 0 || maxNumber < minNumber) return null;
-  const usdVnd = Number(process.env.USD_VND_RATE || 27000);
-  if (!Number.isFinite(usdVnd) || usdVnd <= 0) throw new Error('USD_VND_RATE is invalid');
-  let rate;
+  const mode = String(process.env.PROVIDER_RATE_MODE || 'USD_PER_1000').trim().toUpperCase();
+  const clean = value => roundMoney(value);
+
+  if (!Number.isFinite(service) || !Number.isSafeInteger(service) || !name || !Number.isFinite(rateNumber) || !Number.isFinite(minNumber) || !Number.isFinite(maxNumber) || rateNumber < 0 || minNumber < 0 || maxNumber < minNumber) return null;
+
+  let providerUnitVnd;
   if (mode === 'VND_PER_1') {
-    rate = cleanDecimal(rateNumber);
+    providerUnitVnd = rateNumber;
   } else if (mode === 'VND_PER_1000') {
-    rate = cleanDecimal(rateNumber / 1000);
-  } else {
-    // Default/provider mode: USD per 1,000. Some panels serialize $0.25 as 250;
-    // the two representations are equivalent, so normalize the scaled form.
+    providerUnitVnd = rateNumber / 1000;
+  } else if (mode === 'USD_PER_1000') {
+    const usdVnd = Number(process.env.USD_VND_RATE || 27000);
+    if (!Number.isFinite(usdVnd) || usdVnd <= 0) throw new Error('USD_VND_RATE is invalid');
     const providerUsdPer1000 = rateNumber >= 10 ? rateNumber / 1000 : rateNumber;
-    rate = cleanDecimal(providerUsdPer1000 * usdVnd / 1000);
+    providerUnitVnd = providerUsdPer1000 * usdVnd / 1000;
+  } else {
+    throw new Error(`Unsupported PROVIDER_RATE_MODE: ${mode}`);
   }
-  return {
+
+  const base = {
     service,
     name,
     type,
     platform,
     category,
-    rate,
-    unitRateVnd: rate,
-    providerRate: cleanDecimal(rateNumber),
+    providerRate: clean(rateNumber),
     providerRateMode: mode,
+    providerUnitRateVnd: clean(providerUnitVnd),
     min: String(minNumber),
     max: String(maxNumber),
     refill: toBool(row.refill),
     cancel: toBool(row.cancel)
   };
+
+  return applyPricing(base);
 }
 
 async function fetchProviderServices() {
-  const client = providerClient();
-  const response = await client.post('', new URLSearchParams({
+  const response = await providerClient().post('', new URLSearchParams({
     key: process.env.PROVIDER_API_KEY,
     action: 'services'
-  }).toString());
-  if (!Array.isArray(response.data)) {
-    throw new Error('Provider services response is not an array');
-  }
+  }).toString(), {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+  });
+
+  if (!Array.isArray(response.data)) throw new Error('Provider services response is not an array');
   const normalized = response.data.map(normalizeService).filter(Boolean);
   if (!normalized.length) throw new Error('Provider returned no usable services');
   return normalized;
 }
 
-async function getServices(forceRefresh = false) {
+async function persistCatalog(db, services) {
+  if (!db || !services.length) return;
+  const chunkSize = 400;
+  for (let index = 0; index < services.length; index += chunkSize) {
+    const batch = db.batch();
+    for (const service of services.slice(index, index + chunkSize)) {
+      const ref = db.collection('service_catalog').doc(String(service.service));
+      batch.set(ref, {
+        ...service,
+        lastSyncedAt: new Date()
+      }, { merge: true });
+    }
+    await batch.commit();
+  }
+  await db.collection('system').doc('serviceSync').set({
+    serviceCount: services.length,
+    syncedAt: new Date(),
+    providerRateMode: process.env.PROVIDER_RATE_MODE || 'USD_PER_1000',
+    defaultMarkupPercent: defaultMarkupPercent()
+  }, { merge: true });
+}
+
+async function getServices(forceRefresh = false, db = null) {
   const now = Date.now();
   if (!forceRefresh && cachedServices && now - cachedAt < CACHE_MS) return cachedServices;
-  try {
-    const fresh = await fetchProviderServices();
-    cachedServices = fresh;
-    cachedAt = now;
-    return fresh;
-  } catch (error) {
-    // Keep the last known-good provider list during a transient provider/network error.
-    if (cachedServices && cachedServices.length) {
-      console.error('Provider refresh failed; serving cached services:', error.message);
-      return cachedServices;
+  if (refreshPromise) return refreshPromise;
+
+  refreshPromise = (async () => {
+    try {
+      const freshBase = await fetchProviderServices();
+      const overrides = await getPricingOverrides(db);
+      const fresh = freshBase.map(service => applyPricing(service, overrides.get(String(service.service)))).filter(service => service.enabled);
+      cachedServices = fresh;
+      cachedAt = Date.now();
+      if (db) await persistCatalog(db, fresh);
+      return fresh;
+    } catch (error) {
+      if (cachedServices?.length) {
+        console.error('Provider refresh failed; serving cached services:', error.message);
+        return cachedServices;
+      }
+      throw error;
+    } finally {
+      refreshPromise = null;
     }
-    throw error;
-  }
+  })();
+
+  return refreshPromise;
+}
+
+async function syncServices(db, forceRefresh = true) {
+  return getServices(forceRefresh, db);
 }
 
 router.get('/', async (req, res) => {
   try {
-    const services = await getServices(req.query.refresh === '1');
-    res.json({ services, cachedAt });
+    const services = await getServices(req.query.refresh === '1', req.app.locals.db);
+    res.set('Cache-Control', 'no-store');
+    res.json({ services, cachedAt, count: services.length, defaultMarkupPercent: defaultMarkupPercent() });
   } catch (error) {
     console.error('services:', error.message);
     res.status(502).json({ error: 'Không lấy được danh sách dịch vụ từ Provider' });
@@ -122,7 +160,7 @@ router.get('/:serviceId', async (req, res) => {
   try {
     const serviceId = Number.parseInt(req.params.serviceId, 10);
     if (!Number.isInteger(serviceId)) return res.status(400).json({ error: 'Service ID không hợp lệ' });
-    const services = await getServices(false);
+    const services = await getServices(false, req.app.locals.db);
     const service = services.find(v => v.service === serviceId);
     if (!service) return res.status(404).json({ error: 'Không tìm thấy dịch vụ' });
     res.json({ service });
@@ -134,4 +172,5 @@ router.get('/:serviceId', async (req, res) => {
 
 module.exports = router;
 module.exports.getServices = getServices;
+module.exports.syncServices = syncServices;
 module.exports.normalizeService = normalizeService;
