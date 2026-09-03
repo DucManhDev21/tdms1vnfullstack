@@ -135,12 +135,12 @@ app.locals.verifyToken = verifyToken;
 
 app.get('/health', (req, res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok: true, service: 'TDMS1VN', version: '7.3.0', time: new Date().toISOString() });
+  res.json({ ok: true, service: 'TDMS1VN', version: '7.5.0', time: new Date().toISOString() });
 });
 
 app.get('/api/health', (req,res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok:true, service:'TDMS1VN API', version:'7.3.0', time:new Date().toISOString() });
+  res.json({ ok:true, service:'TDMS1VN API', version:'7.5.0', time:new Date().toISOString() });
 });
 
 app.get('/api/ping', (req,res) => res.json({ ok:true, time:new Date().toISOString() }));
@@ -170,7 +170,7 @@ app.get('/api', (req, res) => {
   res.json({
     ok: true,
     service: 'TDMS1VN API',
-    version: '7.3.0',
+    version: '7.5.0',
     frontend: 'https://tdms1vip.vercel.app',
     endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me', '/api/admin/session']
   });
@@ -180,15 +180,20 @@ app.get('/api', (req, res) => {
 app.post('/api/admin/setup', verifyToken, async (req, res) => {
   try {
     const setupSecret = String(process.env.ADMIN_SETUP_SECRET || '').trim();
+    const adminEmail = String(process.env.ADMIN_EMAIL || '').trim().toLowerCase();
     if (!setupSecret) return res.status(503).json({ ok:false, error:'ADMIN_SETUP_SECRET chưa được cấu hình trên Railway.' });
+    if (!adminEmail) return res.status(503).json({ ok:false, error:'ADMIN_EMAIL chưa được cấu hình trên Railway.' });
     const provided = String(req.body?.secret || '').trim();
     if (!provided || provided.length < 16 || provided !== setupSecret) {
       return res.status(403).json({ ok:false, error:'Mã thiết lập Admin không đúng.' });
     }
     const setupRef = db.collection('system').doc('adminSetup');
     let userRecord = await auth.getUser(req.user.uid);
-    if (!userRecord.email || String(userRecord.email).toLowerCase() !== String(req.body?.email || userRecord.email).trim().toLowerCase()) {
-      return res.status(400).json({ ok:false, error:'Gmail xác thực không khớp.' });
+    if (!userRecord.email || String(userRecord.email).trim().toLowerCase() !== adminEmail) {
+      return res.status(403).json({ ok:false, error:'Tài khoản đăng nhập không trùng ADMIN_EMAIL trên Railway.' });
+    }
+    if (String(req.body?.email || '').trim().toLowerCase() !== adminEmail) {
+      return res.status(400).json({ ok:false, error:'Gmail Admin không khớp cấu hình ADMIN_EMAIL.' });
     }
     // Admin setup already requires Firebase email/password authentication plus the private setup secret.
     // For the one-time bootstrap flow, the backend marks this exact authenticated account as verified.
@@ -198,7 +203,7 @@ app.post('/api/admin/setup', verifyToken, async (req, res) => {
     const result = await db.runTransaction(async tx => {
       const snap = await tx.get(setupRef);
       if (snap.exists && snap.data()?.completedAt) throw Object.assign(new Error('ADMIN_SETUP_LOCKED'), { code:'ADMIN_SETUP_LOCKED' });
-      tx.set(setupRef, { completedAt: admin.firestore.FieldValue.serverTimestamp(), uid:userRecord.uid, email:userRecord.email.toLowerCase(), version:'7.3.0' }, { merge:true });
+      tx.set(setupRef, { completedAt: admin.firestore.FieldValue.serverTimestamp(), uid:userRecord.uid, email:userRecord.email.toLowerCase(), version:'7.5.0' }, { merge:true });
       return true;
     });
     if (result) {
@@ -219,6 +224,8 @@ app.get('/api/admin/session', verifyToken, async (req, res) => {
     const isAdmin = token.admin === true || token.role === 'admin';
     if (!isAdmin) return res.status(403).json({ ok:false, error:'Bạn không có quyền truy cập khu vực Admin.' });
     const userRecord = await auth.getUser(token.uid);
+    const adminEmail = String(process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+    if (adminEmail && String(userRecord.email || '').trim().toLowerCase() !== adminEmail) return res.status(403).json({ ok:false, error:'Email Admin không khớp cấu hình Railway.' });
     if (!userRecord.emailVerified) return res.status(403).json({ ok:false, error:'Gmail Admin chưa được xác minh.' });
     if (userRecord.disabled) return res.status(403).json({ ok:false, error:'Tài khoản Admin đã bị vô hiệu hóa.' });
     res.set('Cache-Control','no-store');
@@ -227,6 +234,98 @@ app.get('/api/admin/session', verifyToken, async (req, res) => {
     console.error('admin session:', error);
     res.status(403).json({ ok:false, error:'Không thể xác thực phiên Admin.' });
   }
+});
+
+
+function requireAdmin(req, res, next) {
+  const token = req.user || {};
+  if (token.admin === true || token.role === 'admin') return next();
+  return res.status(403).json({ ok:false, error:'Bạn không có quyền Admin.' });
+}
+function serializeDoc(doc) {
+  const data = { id: doc.id, ...(doc.data() || {}) };
+  for (const key of Object.keys(data)) {
+    const value = data[key];
+    if (value && typeof value.toDate === 'function') data[key] = value.toDate().toISOString();
+  }
+  return data;
+}
+
+app.get('/api/admin/users', verifyToken, requireAdmin, async (req,res) => {
+  try {
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit || '100',10) || 100,1),200);
+    const snap = await db.collection('users').limit(limit).get();
+    res.json({ ok:true, total:snap.size, items:snap.docs.map(serializeDoc) });
+  } catch(error) { console.error('admin users:',error); res.status(500).json({ok:false,error:'Không thể tải người dùng.'}); }
+});
+
+app.get('/api/admin/orders', verifyToken, requireAdmin, async (req,res) => {
+  try {
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit || '100',10) || 100,1),200);
+    const snap = await db.collection('orders').limit(limit).get();
+    res.json({ ok:true, total:snap.size, items:snap.docs.map(serializeDoc).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||''))) });
+  } catch(error) { console.error('admin orders:',error); res.status(500).json({ok:false,error:'Không thể tải đơn hàng.'}); }
+});
+
+app.get('/api/admin/deposits', verifyToken, requireAdmin, async (req,res) => {
+  try {
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit || '100',10) || 100,1),200);
+    const snap = await db.collection('deposits').limit(limit).get();
+    const items = snap.docs.map(serializeDoc).map(x=>{ delete x.code; return x; }).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
+    res.json({ ok:true, total:items.length, items });
+  } catch(error) { console.error('admin deposits:',error); res.status(500).json({ok:false,error:'Không thể tải yêu cầu nạp tiền.'}); }
+});
+
+app.get('/api/admin/popups', verifyToken, requireAdmin, async (req,res) => {
+  try {
+    const snap = await db.collection('popups').limit(50).get();
+    const items = snap.docs.map(serializeDoc).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
+    res.json({ok:true,total:items.length,items});
+  } catch(error) { console.error('admin popups:',error); res.status(500).json({ok:false,error:'Không thể tải Popup.'}); }
+});
+
+app.post('/api/admin/popups', verifyToken, requireAdmin, async (req,res) => {
+  try {
+    const id = String(req.body?.id||'').trim();
+    const title = String(req.body?.title||'Thông Báo Chung').trim();
+    const content = String(req.body?.content||'');
+    const active = req.body?.active !== false;
+    if(!/^[A-Za-z0-9_-]{1,64}$/.test(id)) return res.status(400).json({ok:false,error:'ID Popup không hợp lệ.'});
+    if(!title || title.length>200 || !content || content.length>5000) return res.status(400).json({ok:false,error:'Tiêu đề hoặc nội dung không hợp lệ.'});
+    const ref=db.collection('popups').doc(id);
+    await ref.set({id,title,content,active,updatedAt:admin.firestore.FieldValue.serverTimestamp(),createdAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true});
+    res.status(201).json({ok:true,id});
+  } catch(error) { console.error('admin popup write:',error); res.status(500).json({ok:false,error:'Không thể lưu Popup.'}); }
+});
+
+app.delete('/api/admin/popups/:id', verifyToken, requireAdmin, async (req,res) => {
+  try {
+    const id=String(req.params.id||'').trim();
+    if(!/^[A-Za-z0-9_-]{1,64}$/.test(id)) return res.status(400).json({ok:false,error:'ID Popup không hợp lệ.'});
+    await db.collection('popups').doc(id).delete();
+    res.json({ok:true});
+  } catch(error) { console.error('admin popup delete:',error); res.status(500).json({ok:false,error:'Không thể xóa Popup.'}); }
+});
+
+app.post('/api/admin/users/balance', verifyToken, requireAdmin, async (req,res) => {
+  try {
+    const username=String(req.body?.username||'').replace(/^@/,'').trim();
+    const amount=Number(req.body?.amount);
+    const reason=String(req.body?.reason||'Admin web điều chỉnh số dư').trim().slice(0,200);
+    if(!/^[a-zA-Z0-9_]{3,24}$/.test(username) || !Number.isFinite(amount) || amount===0 || Math.abs(amount)>1000000000) return res.status(400).json({ok:false,error:'Username hoặc số tiền không hợp lệ.'});
+    const key=username.toLowerCase();
+    const map=await db.collection('usernames').doc(key).get();
+    let uid=map.exists?String(map.data()?.uid||''):'';
+    if(!uid){const exact=await db.collection('users').where('usernameLower','==',key).limit(1).get();if(exact.empty)return res.status(404).json({ok:false,error:'Không tìm thấy username.'});uid=exact.docs[0].id;}
+    const userRef=db.collection('users').doc(uid);
+    const result=await db.runTransaction(async tx=>{
+      const snap=await tx.get(userRef);if(!snap.exists)throw new Error('Tài khoản không tồn tại.');
+      const data=snap.data()||{};const oldBalance=Number(data.balance||0);if(!Number.isFinite(oldBalance))throw new Error('Số dư hiện tại không hợp lệ.');
+      const newBalance=Math.round((oldBalance+amount)*100)/100;if(newBalance<0)throw new Error('Không thể trừ quá số dư hiện tại.');
+      const logRef=db.collection('balance_logs').doc();tx.update(userRef,{balance:newBalance,updatedAt:admin.firestore.FieldValue.serverTimestamp()});tx.set(logRef,{uid,amount,type:amount>0?'credit':'debit',reason,oldBalance,newBalance,adminAction:'web_admin',adminUid:req.user.uid,createdAt:admin.firestore.FieldValue.serverTimestamp()});return {username:String(data.username||username),email:String(data.email||''),oldBalance,newBalance};
+    });
+    res.json({ok:true,balance:result.newBalance,...result});
+  } catch(error){console.error('admin balance:',error);res.status(400).json({ok:false,error:error.message||'Không thể điều chỉnh số dư.'});}
 });
 
 app.get('/api/public/stats', async (req, res) => {
