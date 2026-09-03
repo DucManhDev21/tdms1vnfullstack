@@ -10,8 +10,6 @@ const admin = require('firebase-admin');
 const servicesRouter = require('./services');
 const orderRouter = require('./order');
 const cronModule = require('./cron');
-const servicesModule = require('./services');
-const { getPricingOverrides, parseMarkup, roundMoney } = require('./pricing');
 const depositRouter = require('./deposit');
 const { startAdminBot } = require('./admin-bot');
 
@@ -137,12 +135,12 @@ app.locals.verifyToken = verifyToken;
 
 app.get('/health', (req, res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok: true, service: 'TDMS1VN', version: '8.0.0', time: new Date().toISOString() });
+  res.json({ ok: true, service: 'TDMS1VN', version: '7.6.0', time: new Date().toISOString() });
 });
 
 app.get('/api/health', (req,res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok:true, service:'TDMS1VN API', version:'8.0.0', time:new Date().toISOString() });
+  res.json({ ok:true, service:'TDMS1VN API', version:'7.6.0', time:new Date().toISOString() });
 });
 
 app.get('/api/ping', (req,res) => res.json({ ok:true, time:new Date().toISOString() }));
@@ -156,7 +154,7 @@ app.get('/api/system/status', async (req, res) => {
       api: 'online',
       firestore: 'online',
       adminTelegramBot: Boolean(String(process.env.ADMIN_TELEGRAM_BOT_TOKEN || '').trim()),
-      pricing: { providerRateMode: process.env.PROVIDER_RATE_MODE || 'USD_PER_1000', displayUnit: 'VND/1', defaultMarkupPercent: Number(process.env.SERVICE_MARKUP_PERCENT || 0) },
+      pricing: { providerRateMode: process.env.PROVIDER_RATE_MODE || 'USD_PER_1000', displayUnit: 'VND/1' },
       time: new Date().toISOString()
     });
   } catch (error) {
@@ -172,7 +170,7 @@ app.get('/api', (req, res) => {
   res.json({
     ok: true,
     service: 'TDMS1VN API',
-    version: '8.0.0',
+    version: '7.6.0',
     frontend: 'https://tdms1vip.vercel.app',
     endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me', '/api/admin/session']
   });
@@ -181,39 +179,38 @@ app.get('/api', (req, res) => {
 
 const ADMIN_EMAIL = 'tranvanmanhbg123bg@gmail.com';
 
-function isConfiguredAdminEmail(email) {
-  return String(email || '').trim().toLowerCase() === ADMIN_EMAIL;
-}
-
 app.get('/api/admin/session', verifyToken, async (req, res) => {
   try {
     const userRecord = await auth.getUser(req.user.uid);
-    if (!userRecord.email || !isConfiguredAdminEmail(userRecord.email)) {
-      return res.status(403).json({ ok:false, error:'Tài khoản này không nằm trong danh sách Admin.' });
+    const email = String(userRecord.email || '').trim().toLowerCase();
+
+    if (email !== ADMIN_EMAIL) {
+      return res.status(403).json({ ok:false, admin:false, error:'Tài khoản không có quyền Admin.' });
     }
     if (userRecord.disabled) {
-      return res.status(403).json({ ok:false, error:'Tài khoản Admin đã bị vô hiệu hóa.' });
+      return res.status(403).json({ ok:false, admin:false, error:'Tài khoản Admin đã bị vô hiệu hóa.' });
     }
-    if (!userRecord.emailVerified) {
-      return res.status(403).json({ ok:false, error:'Gmail Admin chưa được xác minh trên Firebase.' });
-    }
-    res.set('Cache-Control','no-store');
-    res.json({
-      ok:true,
-      admin:true,
-      uid:userRecord.uid,
-      email:userRecord.email,
-      admins:[ADMIN_EMAIL]
-    });
+
+    res.set('Cache-Control', 'no-store');
+    return res.json({ ok:true, admin:true, uid:userRecord.uid, email:userRecord.email || '' });
   } catch (error) {
     console.error('admin session:', error);
-    res.status(403).json({ ok:false, error:'Không thể xác thực phiên Admin.' });
+    return res.status(403).json({ ok:false, admin:false, error:'Không thể xác thực phiên Admin.' });
   }
 });
 
 function requireAdmin(req, res, next) {
-  if (isConfiguredAdminEmail(req.user?.email)) return next();
+  const email = String(req.user?.email || '').trim().toLowerCase();
+  if (email === ADMIN_EMAIL) return next();
   return res.status(403).json({ ok:false, error:'Bạn không có quyền Admin.' });
+}
+function serializeDoc(doc) {
+  const data = { id: doc.id, ...(doc.data() || {}) };
+  for (const key of Object.keys(data)) {
+    const value = data[key];
+    if (value && typeof value.toDate === 'function') data[key] = value.toDate().toISOString();
+  }
+  return data;
 }
 
 app.get('/api/admin/users', verifyToken, requireAdmin, async (req,res) => {
@@ -293,101 +290,6 @@ app.post('/api/admin/users/balance', verifyToken, requireAdmin, async (req,res) 
   } catch(error){console.error('admin balance:',error);res.status(400).json({ok:false,error:error.message||'Không thể điều chỉnh số dư.'});}
 });
 
-
-app.get('/api/admin/dashboard', verifyToken, requireAdmin, async (req, res) => {
-  try {
-    const dashboard = await adminDashboard(db);
-    const serviceSync = await db.collection('system').doc('serviceSync').get();
-    const syncData = serviceSync.exists ? serviceSync.data() || {} : {};
-    res.json({ ok: true, ...dashboard, serviceSync: serializeData(syncData) });
-  } catch (error) {
-    console.error('admin dashboard:', error);
-    res.status(500).json({ ok: false, error: 'Không thể tải dashboard Admin.' });
-  }
-});
-
-function serializeData(data) {
-  const result = { ...(data || {}) };
-  for (const key of Object.keys(result)) {
-    const value = result[key];
-    if (value && typeof value.toDate === 'function') result[key] = value.toDate().toISOString();
-  }
-  return result;
-}
-
-app.get('/api/admin/services', verifyToken, requireAdmin, async (req, res) => {
-  try {
-    const services = await servicesModule.getServices(req.query.refresh === '1', db);
-    const overrides = await getPricingOverrides(db);
-    const items = services.map(service => ({ ...service, pricingOverride: overrides.get(String(service.service)) || null }));
-    res.json({ ok: true, total: items.length, items, defaultMarkupPercent: Number(process.env.SERVICE_MARKUP_PERCENT || 0) });
-  } catch (error) {
-    console.error('admin services:', error);
-    res.status(502).json({ ok: false, error: 'Không thể tải service catalog.' });
-  }
-});
-
-app.post('/api/admin/services/sync', verifyToken, requireAdmin, async (req, res) => {
-  try {
-    const services = await servicesModule.syncServices(db, true);
-    res.json({ ok: true, serviceCount: services.length, markupPercent: Number(process.env.SERVICE_MARKUP_PERCENT || 0), syncedAt: new Date().toISOString() });
-  } catch (error) {
-    console.error('admin service sync:', error);
-    res.status(502).json({ ok: false, error: 'Không đồng bộ được dịch vụ từ Provider.' });
-  }
-});
-
-app.post('/api/admin/services/:serviceId/pricing', verifyToken, requireAdmin, async (req, res) => {
-  try {
-    const serviceId = Number.parseInt(req.params.serviceId, 10);
-    if (!Number.isSafeInteger(serviceId)) return res.status(400).json({ ok: false, error: 'Service ID không hợp lệ.' });
-    const markupPercent = parseMarkup(req.body?.markupPercent, Number(process.env.SERVICE_MARKUP_PERCENT || 0));
-    let fixedUnitRateVnd = null;
-    if (req.body?.fixedUnitRateVnd !== undefined && req.body?.fixedUnitRateVnd !== null && String(req.body.fixedUnitRateVnd).trim() !== '') {
-      fixedUnitRateVnd = Number(req.body.fixedUnitRateVnd);
-      if (!Number.isFinite(fixedUnitRateVnd) || fixedUnitRateVnd < 0) return res.status(400).json({ ok: false, error: 'Giá bán cố định không hợp lệ.' });
-      fixedUnitRateVnd = roundMoney(fixedUnitRateVnd);
-    }
-    const enabled = req.body?.enabled !== false;
-    await db.collection('service_pricing').doc(String(serviceId)).set({
-      serviceId,
-      markupPercent,
-      fixedUnitRateVnd,
-      enabled,
-      updatedBy: req.user.uid,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    }, { merge: true });
-    await db.collection('admin_audit_logs').add({
-      action: 'service_pricing_update',
-      serviceId,
-      markupPercent,
-      fixedUnitRateVnd,
-      enabled,
-      adminUid: req.user.uid,
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
-    });
-    await servicesModule.syncServices(db, true);
-    res.json({ ok: true, serviceId, markupPercent, fixedUnitRateVnd, enabled });
-  } catch (error) {
-    console.error('admin pricing:', error);
-    res.status(500).json({ ok: false, error: 'Không thể cập nhật giá dịch vụ.' });
-  }
-});
-
-app.delete('/api/admin/services/:serviceId/pricing', verifyToken, requireAdmin, async (req, res) => {
-  try {
-    const serviceId = Number.parseInt(req.params.serviceId, 10);
-    if (!Number.isSafeInteger(serviceId)) return res.status(400).json({ ok: false, error: 'Service ID không hợp lệ.' });
-    await db.collection('service_pricing').doc(String(serviceId)).delete();
-    await db.collection('admin_audit_logs').add({ action: 'service_pricing_reset', serviceId, adminUid: req.user.uid, createdAt: admin.firestore.FieldValue.serverTimestamp() });
-    await servicesModule.syncServices(db, true);
-    res.json({ ok: true, serviceId });
-  } catch (error) {
-    console.error('admin pricing reset:', error);
-    res.status(500).json({ ok: false, error: 'Không thể đặt lại giá dịch vụ.' });
-  }
-});
-
 app.get('/api/public/stats', async (req, res) => {
   try {
     const [usersSnap, ordersSnap, completedSnap] = await Promise.all([
@@ -404,8 +306,8 @@ app.get('/api/public/stats', async (req, res) => {
 
 app.get('/api/config/public', (req, res) => {
   res.json({
-    telegram: process.env.ADMIN_TELEGRAM_HANDLE || '',
-    email: process.env.ADMIN_EMAIL || String(process.env.ADMIN_EMAILS || '').split(',').map(v=>v.trim()).find(Boolean) || '',
+    telegram: process.env.ADMIN_TELEGRAM_HANDLE || '@ducmanh2109',
+    email: process.env.ADMIN_EMAIL || 'tranvanmanhbg123bg@gmail.com',
     bank: {
       bankBin: process.env.BANK_BIN || '',
       accountNumber: process.env.BANK_ACCOUNT_NUMBER || '',
@@ -415,9 +317,9 @@ app.get('/api/config/public', (req, res) => {
     currency: process.env.CURRENCY || 'VND',
     cardTypes: String(process.env.CARD_TYPES || 'Viettel,Vinaphone,Mobifone,Vietnamobile,Zing,Gate,Garena').split(',').map(v => v.trim()).filter(Boolean),
     cardDenominations: String(process.env.CARD_DENOMINATIONS || '10000,20000,30000,50000,100000,200000,300000,500000,1000000').split(',').map(v => Number.parseInt(v.trim(), 10)).filter(v => Number.isInteger(v) && v > 0),
-    cardDiscountPercent: Number(process.env.CARD_DISCOUNT_PERCENT || 30),
+    cardDiscountPercent: 30,
     bankCreditPercent: 100,
-    pricing: { providerRateMode: process.env.PROVIDER_RATE_MODE || 'USD_PER_1000', displayUnit: 'VND/1', defaultMarkupPercent: Number(process.env.SERVICE_MARKUP_PERCENT || 0) }, adminTelegramBot: Boolean(String(process.env.ADMIN_TELEGRAM_BOT_TOKEN || '').trim())
+    pricing: { providerRateMode: process.env.PROVIDER_RATE_MODE || 'USD_PER_1000', displayUnit: 'VND/1' }, adminTelegramBot: Boolean(String(process.env.ADMIN_TELEGRAM_BOT_TOKEN || '').trim())
   });
 });
 
@@ -558,21 +460,12 @@ if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`TDMS1VN API server listening on ${PORT}`);
     startAdminBot(db, admin).catch(error => console.error('Admin Telegram bot startup:', error));
-    const orderInterval = Number(process.env.ORDER_SYNC_INTERVAL_MS || 300000);
-    if (Number.isFinite(orderInterval) && orderInterval >= 60000) {
+    const interval = Number(process.env.ORDER_SYNC_INTERVAL_MS || 300000);
+    if (Number.isFinite(interval) && interval >= 60000) {
       setInterval(() => {
         cronModule.runScheduledSync(db, admin).catch(error => console.error('scheduled order sync:', error));
-      }, orderInterval).unref();
+      }, interval).unref();
     }
-    const serviceInterval = Number(process.env.SERVICE_AUTO_SYNC_INTERVAL_MS || 900000);
-    if (Number.isFinite(serviceInterval) && serviceInterval >= 60000) {
-      setInterval(() => {
-        cronModule.runScheduledServiceSync(db).catch(error => console.error('scheduled service sync:', error));
-      }, serviceInterval).unref();
-    }
-    setTimeout(() => {
-      cronModule.runScheduledServiceSync(db).catch(error => console.error('initial service sync:', error));
-    }, 5000).unref();
   });
 }
 

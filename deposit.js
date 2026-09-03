@@ -20,7 +20,7 @@ function telegramClient() {
   return axios.create({ baseURL: `https://api.telegram.org/bot${botToken}`, timeout: 15000 });
 }
 function esc(value) { return String(value ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-function cardCredit(faceValue) { const discount = Number(process.env.CARD_DISCOUNT_PERCENT || 30); return Math.round(Number(faceValue) * (1 - discount / 100)); }
+function cardCredit(faceValue) { return Math.round(Number(faceValue) * 0.70); }
 function bankCredit(amount) { return Number(amount); }
 async function telegram(method, payload) {
   const response = await telegramClient().post(`/${method}`, payload);
@@ -78,8 +78,8 @@ router.post('/cards', requireUser, async (req,res) => {
   if(!configuredCardTypes().has(type)||!configuredAmounts().has(normalizedAmount)||!serialClean||!codeClean) return res.status(400).json({error:'Loại thẻ hoặc mệnh giá không hợp lệ'});
   if(serialClean.length>100||codeClean.length>100) return res.status(400).json({error:'Thông tin thẻ quá dài'});
   try {
-    const result=await createDepositAndNotify({db,admin,uid,type:'card',amount:normalizedAmount,extra:{cardType:type,serial:serialClean,code:codeClean,discountPercent:Number(process.env.CARD_DISCOUNT_PERCENT || 30)}});
-    res.status(201).json({ok:true,depositId:result.id,adminNotified:result.adminNotified,faceValue:normalizedAmount,creditedAmount:cardCredit(normalizedAmount),discountPercent:Number(process.env.CARD_DISCOUNT_PERCENT || 30)});
+    const result=await createDepositAndNotify({db,admin,uid,type:'card',amount:normalizedAmount,extra:{cardType:type,serial:serialClean,code:codeClean,discountPercent:30}});
+    res.status(201).json({ok:true,depositId:result.id,adminNotified:result.adminNotified,faceValue:normalizedAmount,creditedAmount:cardCredit(normalizedAmount),discountPercent:30});
   } catch(error) { console.error('deposit card:',error); res.status(500).json({error:'Không thể gửi yêu cầu nạp thẻ'}); }
 });
 
