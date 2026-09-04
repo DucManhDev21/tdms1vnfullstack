@@ -14,6 +14,7 @@ const servicesModule = require('./services');
 const { getPricingOverrides, parseMarkup, roundMoney } = require('./pricing');
 const depositRouter = require('./deposit');
 const { startAdminBot } = require('./admin-bot');
+const { ensureOwnerAdmin, isAdmin, listAdmins } = require('./admins');
 
 const app = express();
 const PORT = Number(process.env.PORT || 8080);
@@ -137,12 +138,12 @@ app.locals.verifyToken = verifyToken;
 
 app.get('/health', (req, res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok: true, service: 'TDMS1VN', version: '8.0.0', time: new Date().toISOString() });
+  res.json({ ok: true, service: 'TDMS1VN', version: '10.0.0', time: new Date().toISOString() });
 });
 
 app.get('/api/health', (req,res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok:true, service:'TDMS1VN API', version:'8.0.0', time:new Date().toISOString() });
+  res.json({ ok:true, service:'TDMS1VN API', version:'10.0.0', time:new Date().toISOString() });
 });
 
 app.get('/api/ping', (req,res) => res.json({ ok:true, time:new Date().toISOString() }));
@@ -172,49 +173,55 @@ app.get('/api', (req, res) => {
   res.json({
     ok: true,
     service: 'TDMS1VN API',
-    version: '8.0.0',
+    version: '10.0.0',
     frontend: 'https://tdms1vip.vercel.app',
     endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me', '/api/admin/session']
   });
 });
 
 
-const ADMIN_EMAIL = 'tranvanmanhbg123bg@gmail.com';
-
-function isConfiguredAdminEmail(email) {
-  return String(email || '').trim().toLowerCase() === ADMIN_EMAIL;
-}
+const ADMIN_EMAIL = String(process.env.ADMIN_EMAIL || '').trim().toLowerCase();
 
 app.get('/api/admin/session', verifyToken, async (req, res) => {
   try {
     const userRecord = await auth.getUser(req.user.uid);
-    if (!userRecord.email || !isConfiguredAdminEmail(userRecord.email)) {
-      return res.status(403).json({ ok:false, error:'Tài khoản này không nằm trong danh sách Admin.' });
-    }
-    if (userRecord.disabled) {
-      return res.status(403).json({ ok:false, error:'Tài khoản Admin đã bị vô hiệu hóa.' });
-    }
-    if (!userRecord.emailVerified) {
-      return res.status(403).json({ ok:false, error:'Gmail Admin chưa được xác minh trên Firebase.' });
-    }
+    const email = String(userRecord.email || '').trim().toLowerCase();
+    if (!email) return res.status(403).json({ ok:false, error:'Tài khoản chưa có email.' });
+    if (userRecord.disabled) return res.status(403).json({ ok:false, error:'Tài khoản đã bị vô hiệu hóa.' });
+    if (!userRecord.emailVerified) return res.status(403).json({ ok:false, error:'Gmail chưa được xác minh trên Firebase.' });
+    const allowed = await isAdmin(db, email);
+    if (!allowed) return res.status(403).json({ ok:false, error:'Tài khoản này không nằm trong danh sách Admin.' });
     res.set('Cache-Control','no-store');
-    res.json({
-      ok:true,
-      admin:true,
-      uid:userRecord.uid,
-      email:userRecord.email,
-      admins:[ADMIN_EMAIL]
-    });
+    res.json({ ok:true, admin:true, uid:userRecord.uid, email:userRecord.email });
   } catch (error) {
     console.error('admin session:', error);
     res.status(403).json({ ok:false, error:'Không thể xác thực phiên Admin.' });
   }
 });
 
-function requireAdmin(req, res, next) {
-  if (isConfiguredAdminEmail(req.user?.email)) return next();
-  return res.status(403).json({ ok:false, error:'Bạn không có quyền Admin.' });
+async function requireAdmin(req, res, next) {
+  try {
+    const email = String(req.user?.email || '').trim().toLowerCase();
+    if (!email || !(await isAdmin(db, email))) {
+      return res.status(403).json({ ok:false, error:'Bạn không có quyền Admin.' });
+    }
+    return next();
+  } catch (error) {
+    console.error('requireAdmin:', error);
+    return res.status(500).json({ ok:false, error:'Không thể kiểm tra quyền Admin.' });
+  }
 }
+
+app.get('/api/admin/admins', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const items = await listAdmins(db);
+    res.set('Cache-Control','no-store');
+    res.json({ ok:true, total:items.length, items });
+  } catch (error) {
+    console.error('admin list:', error);
+    res.status(500).json({ ok:false, error:'Không thể tải danh sách Admin.' });
+  }
+});
 
 app.get('/api/admin/users', verifyToken, requireAdmin, async (req,res) => {
   try {
@@ -405,7 +412,7 @@ app.get('/api/public/stats', async (req, res) => {
 app.get('/api/config/public', (req, res) => {
   res.json({
     telegram: process.env.ADMIN_TELEGRAM_HANDLE || '',
-    email: process.env.ADMIN_EMAIL || String(process.env.ADMIN_EMAILS || '').split(',').map(v=>v.trim()).find(Boolean) || '',
+    email: process.env.ADMIN_EMAIL || '',
     bank: {
       bankBin: process.env.BANK_BIN || '',
       accountNumber: process.env.BANK_ACCOUNT_NUMBER || '',
@@ -555,8 +562,14 @@ app.use((error, req, res, next) => {
 });
 
 if (require.main === module) {
-  app.listen(PORT, () => {
+  app.listen(PORT, async () => {
     console.log(`TDMS1VN API server listening on ${PORT}`);
+    try {
+      const owner = await ensureOwnerAdmin(db, admin);
+      console.log(`Admin owner bootstrap ready: ${owner}`);
+    } catch (error) {
+      console.error('Admin bootstrap:', error.message);
+    }
     startAdminBot(db, admin).catch(error => console.error('Admin Telegram bot startup:', error));
     const orderInterval = Number(process.env.ORDER_SYNC_INTERVAL_MS || 300000);
     if (Number.isFinite(orderInterval) && orderInterval >= 60000) {

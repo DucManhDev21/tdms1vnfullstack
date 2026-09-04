@@ -1,6 +1,7 @@
 const axios = require('axios');
 const { syncOrders } = require('./order-sync');
 const { syncServices } = require('./services');
+const { addAdmin, deleteAdmin, listAdmins, validateEmail, ownerEmail } = require('./admins');
 
 let started = false;
 let offset = 0;
@@ -51,6 +52,25 @@ function parseTake(text) {
   if (!username || username.length > 64) throw new Error('Username không hợp lệ.');
   if (!Number.isFinite(amount) || amount <= 0 || amount > 1000000000) throw new Error('Số tiền phải lớn hơn 0 và tối đa 1.000.000.000đ.');
   return { username, amount: Math.round(amount * 100) / 100 };
+}
+
+function parseAdminEmail(text, command) {
+  const p = String(text || '').trim().split(/\s+/);
+  if (p.length !== 2) throw new Error(`Cú pháp: ${command} email@gmail.com`);
+  return validateEmail(p[1]);
+}
+
+async function sendAdminList(chatId, db) {
+  const admins = await listAdmins(db);
+  const owner = ownerEmail();
+  if (!admins.length) {
+    return telegram('sendMessage', { chat_id: chatId, text: '📋 <b>DANH SÁCH ADMIN</b>\n\nChưa có Admin nào.', parse_mode:'HTML' });
+  }
+  const lines = admins.map((item, index) => {
+    const badge = String(item.email).toLowerCase() === owner ? ' 👑 <b>OWNER</b>' : '';
+    return `${index + 1}. <code>${esc(item.email)}</code>${badge}`;
+  });
+  return telegram('sendMessage', { chat_id: chatId, text:`👑 <b>DANH SÁCH ADMIN (${admins.length})</b>\n\n${lines.join('\n')}`, parse_mode:'HTML' });
 }
 
 function validPopupId(id) { return /^[A-Za-z0-9_-]{1,64}$/.test(String(id || '').trim()); }
@@ -138,12 +158,23 @@ async function deletePopup(db,id) {
   await db.runTransaction(async tx=>{const snap=await tx.get(ref);if(!snap.exists)throw new Error(`Không tìm thấy popup ${id}.`);tx.delete(ref);});
 }
 async function sendHelp(chatId) {
-  return telegram('sendMessage',{chat_id:chatId,text:'<b>TDMS1VN V8 ADMIN BOT</b>\n\n/pay username số_tiền\n/take username số_tiền\n/syncorders\n/syncservices\n/stats\n/addpopup ID | Tiêu đề | Nội dung\n/deletepopup ID\n/help\n\nVí dụ:\n/pay hung123 50000\n/take hung123 50000\n/addpopup TB1 | Khuyến mãi | Nội dung thông báo\n/deletepopup TB1',parse_mode:'HTML'});
+  return telegram('sendMessage',{chat_id:chatId,text:'<b>TDMS1VN V10 ADMIN BOT</b>\n\n/pay username số_tiền\n/take username số_tiền\n/syncorders\n/syncservices\n/stats\n/addpopup ID | Tiêu đề | Nội dung\n/deletepopup ID\n/addadmin email@gmail.com\n/deleteadmin email@gmail.com\n/listadmin\n/help\n\nVí dụ:\n/pay hung123 50000\n/take hung123 50000\n/addpopup TB1 | Khuyến mãi | Nội dung thông báo\n/deletepopup TB1\n/addadmin admin2@gmail.com\n/deleteadmin admin2@gmail.com\n/listadmin',parse_mode:'HTML'});
 }
 async function handleMessage(message,db,admin) {
   const chatId=String(message?.chat?.id||''); const text=String(message?.text||'').trim(); if(!text.startsWith('/'))return;
   const command=text.split(/\s+/)[0].split('@')[0].toLowerCase();
   if(command==='/start'||command==='/help')return sendHelp(chatId);
+  if(command==='/listadmin') return sendAdminList(chatId, db);
+  if(command==='/addadmin'){
+    const email=parseAdminEmail(text,'/addadmin');
+    const added=await addAdmin(db,admin,email,{source:'telegram',telegramUserId:String(message?.from?.id||''),telegramUsername:String(message?.from?.username||'')});
+    return telegram('sendMessage',{chat_id:chatId,text:`✅ <b>ĐÃ THÊM ADMIN</b>\n\n📧 <code>${esc(added.email)}</code>\n\nTài khoản này đăng nhập Firebase bằng đúng email trên sẽ có quyền Admin.`,parse_mode:'HTML'});
+  }
+  if(command==='/deleteadmin'){
+    const email=parseAdminEmail(text,'/deleteadmin');
+    const deleted=await deleteAdmin(db,admin,email,{source:'telegram',telegramUserId:String(message?.from?.id||''),telegramUsername:String(message?.from?.username||'')});
+    return telegram('sendMessage',{chat_id:chatId,text:`🗑️ <b>ĐÃ XÓA ADMIN</b>\n\n📧 <code>${esc(deleted)}</code>\n\nQuyền Admin sẽ không còn hiệu lực ở lần kiểm tra phiên tiếp theo.`,parse_mode:'HTML'});
+  }
   if(command==='/pay'){const {username,amount}=parsePay(text);const r=await pay(db,admin,username,amount);return telegram('sendMessage',{chat_id:chatId,text:`✅ <b>CỘNG TIỀN THÀNH CÔNG</b>\n\n👤 Username: <code>@${esc(r.username)}</code>\n📧 Gmail: <code>${esc(r.email||'—')}</code>\n💰 Cộng: <b>${money(r.amount)}</b>\n💳 Số dư cũ: ${money(r.oldBalance)}\n💳 Số dư mới: <b>${money(r.newBalance)}</b>`,parse_mode:'HTML'});}
   if(command==='/take'){const {username,amount}=parseTake(text);const r=await take(db,admin,username,amount);return telegram('sendMessage',{chat_id:chatId,text:`✅ <b>TRỪ TIỀN THÀNH CÔNG</b>\n\n👤 Username: <code>@${esc(r.username)}</code>\n📧 Gmail: <code>${esc(r.email||'—')}</code>\n💸 Trừ: <b>${money(r.amount)}</b>\n💳 Số dư cũ: ${money(r.oldBalance)}\n💳 Số dư mới: <b>${money(r.newBalance)}</b>`,parse_mode:'HTML'});}
   if(command==='/syncorders'){
@@ -162,7 +193,7 @@ async function handleMessage(message,db,admin) {
       db.collection('orders').where('status','==','Completed').count().get(),
       db.collection('deposits').count().get()
     ]);
-    return telegram('sendMessage',{chat_id:chatId,text:`📊 <b>TDMS1VN V8</b>\n\n👤 Users: <b>${users.data().count}</b>\n📦 Orders: <b>${orders.data().count}</b>\n⏳ Đang chạy: <b>${pending.data().count}</b>\n✅ Completed: <b>${completed.data().count}</b>\n💰 Deposit requests: <b>${deposits.data().count}</b>`,parse_mode:'HTML'});
+    return telegram('sendMessage',{chat_id:chatId,text:`📊 <b>TDMS1VN V10</b>\n\n👤 Users: <b>${users.data().count}</b>\n📦 Orders: <b>${orders.data().count}</b>\n⏳ Đang chạy: <b>${pending.data().count}</b>\n✅ Completed: <b>${completed.data().count}</b>\n💰 Deposit requests: <b>${deposits.data().count}</b>`,parse_mode:'HTML'});
   }
   if(command==='/addpopup'){const data=parseAddPopup(text);await addPopup(db,admin,data);return telegram('sendMessage',{chat_id:chatId,text:`✅ <b>ĐÃ THÊM POPUP</b>\n\n🆔 ID: <code>${esc(data.id)}</code>\n📌 Tiêu đề: <b>${esc(data.title)}</b>\n📝 Nội dung: ${esc(data.content)}`,parse_mode:'HTML'});}
   if(command==='/deletepopup'){const id=parseDeletePopup(text);await deletePopup(db,id);return telegram('sendMessage',{chat_id:chatId,text:`🗑️ Đã xóa popup <code>${esc(id)}</code>.`,parse_mode:'HTML'});}
