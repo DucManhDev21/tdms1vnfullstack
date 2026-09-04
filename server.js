@@ -138,7 +138,7 @@ app.locals.verifyToken = verifyToken;
 
 app.get('/health', (req, res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok: true, service: 'TDMS1VN', version: '10.1.0', time: new Date().toISOString() });
+  res.json({ ok: true, service: 'TDMS1VN', version: '10.2.1', time: new Date().toISOString() });
 });
 
 app.get('/api/health', (req,res) => {
@@ -300,6 +300,52 @@ app.post('/api/admin/users/balance', verifyToken, requireAdmin, async (req,res) 
   } catch(error){console.error('admin balance:',error);res.status(400).json({ok:false,error:error.message||'Không thể điều chỉnh số dư.'});}
 });
 
+
+async function adminDashboard(db) {
+  const [usersCount, ordersCount, depositsCount, popupCount, completedCount, processingCount, canceledCount, orderSnap, depositSnap] = await Promise.all([
+    db.collection('users').count().get(),
+    db.collection('orders').count().get(),
+    db.collection('deposits').count().get(),
+    db.collection('popups').count().get(),
+    db.collection('orders').where('status', '==', 'Completed').count().get(),
+    db.collection('orders').where('status', 'in', ['Pending', 'In progress', 'Partial']).count().get(),
+    db.collection('orders').where('status', '==', 'Canceled').count().get(),
+    db.collection('orders').select('totalPrice', 'status').get(),
+    db.collection('deposits').select('creditedAmount', 'status').get()
+  ]);
+
+  let orderRevenue = 0;
+  let completedRevenue = 0;
+  let depositCredited = 0;
+
+  for (const doc of orderSnap.docs) {
+    const data = doc.data() || {};
+    const value = Number(data.totalPrice || 0);
+    if (Number.isFinite(value) && value >= 0) {
+      orderRevenue += value;
+      if (data.status === 'Completed') completedRevenue += value;
+    }
+  }
+
+  for (const doc of depositSnap.docs) {
+    const data = doc.data() || {};
+    const value = Number(data.creditedAmount || 0);
+    if (data.status === 'Đã duyệt' && Number.isFinite(value)) depositCredited += value;
+  }
+
+  return {
+    users: usersCount.data().count,
+    orders: ordersCount.data().count,
+    deposits: depositsCount.data().count,
+    popups: popupCount.data().count,
+    completed: completedCount.data().count,
+    processing: processingCount.data().count,
+    canceled: canceledCount.data().count,
+    orderRevenue: roundMoney(orderRevenue),
+    completedRevenue: roundMoney(completedRevenue),
+    approvedDepositCredit: roundMoney(depositCredited)
+  };
+}
 
 app.get('/api/admin/dashboard', verifyToken, requireAdmin, async (req, res) => {
   try {
