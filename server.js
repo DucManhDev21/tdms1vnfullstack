@@ -138,12 +138,12 @@ app.locals.verifyToken = verifyToken;
 
 app.get('/health', (req, res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok: true, service: 'TDMS1VN', version: '10.3.0', time: new Date().toISOString() });
+  res.json({ ok: true, service: 'TDMS1VN', version: '11.0.0', time: new Date().toISOString() });
 });
 
 app.get('/api/health', (req,res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok:true, service:'TDMS1VN API', version:'10.3.0', time:new Date().toISOString() });
+  res.json({ ok:true, service:'TDMS1VN API', version:'11.0.0', time:new Date().toISOString() });
 });
 
 app.get('/api/ping', (req,res) => res.json({ ok:true, time:new Date().toISOString() }));
@@ -173,7 +173,7 @@ app.get('/api', (req, res) => {
   res.json({
     ok: true,
     service: 'TDMS1VN API',
-    version: '10.3.0',
+    version: '11.0.0',
     frontend: 'https://tdms1vip.vercel.app',
     endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me', '/api/admin/session']
   });
@@ -189,26 +189,33 @@ app.get('/api/admin/session', verifyToken, async (req, res) => {
     if (!email) return res.status(403).json({ ok:false, error:'Tài khoản chưa có email.' });
     if (userRecord.disabled) return res.status(403).json({ ok:false, error:'Tài khoản đã bị vô hiệu hóa.' });
     if (!userRecord.emailVerified) return res.status(403).json({ ok:false, error:'Gmail chưa được xác minh trên Firebase.' });
-    const allowed = await isAdmin(db, email);
-    if (!allowed) return res.status(403).json({ ok:false, error:'Tài khoản này không nằm trong danh sách Admin.' });
+    try {
+      const allowed = await isAdmin(db, email);
+      if (!allowed) return res.status(403).json({ ok:false, error:'Tài khoản này không nằm trong danh sách Admin.' });
+    } catch (dependencyError) {
+      console.error('admin session dependency:', dependencyError?.code || 'unknown', dependencyError?.message || dependencyError);
+      if (email !== ADMIN_EMAIL) return res.status(503).json({ ok:false, error:'Dịch vụ phân quyền Admin tạm thời không khả dụng.', code:'ADMIN_AUTH_DEPENDENCY_UNAVAILABLE' });
+    }
     res.set('Cache-Control','no-store');
-    res.json({ ok:true, admin:true, uid:userRecord.uid, email:userRecord.email });
+    res.json({ ok:true, admin:true, uid:userRecord.uid, email:userRecord.email, degraded: false });
   } catch (error) {
     console.error('admin session:', error);
-    res.status(403).json({ ok:false, error:'Không thể xác thực phiên Admin.' });
+    res.status(503).json({ ok:false, error:'Máy chủ Admin tạm thời không thể xác thực phiên.', code:error?.code || 'ADMIN_SESSION_UNAVAILABLE' });
   }
 });
 
 async function requireAdmin(req, res, next) {
+  const email = String(req.user?.email || '').trim().toLowerCase();
+  if (!email) return res.status(403).json({ ok:false, error:'Tài khoản không có email.' });
   try {
-    const email = String(req.user?.email || '').trim().toLowerCase();
-    if (!email || !(await isAdmin(db, email))) {
-      return res.status(403).json({ ok:false, error:'Bạn không có quyền Admin.' });
-    }
-    return next();
+    if (await isAdmin(db, email)) return next();
+    return res.status(403).json({ ok:false, error:'Bạn không có quyền Admin.' });
   } catch (error) {
-    console.error('requireAdmin:', error);
-    return res.status(500).json({ ok:false, error:'Không thể kiểm tra quyền Admin.' });
+    console.error('requireAdmin:', error?.code || 'unknown', error?.message || error);
+    // The permanent owner can still enter the control center if Firestore is temporarily unavailable.
+    // Other admins cannot be safely authorized without the admins collection.
+    if (email === ADMIN_EMAIL) return next();
+    return res.status(503).json({ ok:false, error:'Dịch vụ phân quyền Admin tạm thời không khả dụng.', code:'ADMIN_AUTH_DEPENDENCY_UNAVAILABLE' });
   }
 }
 
@@ -283,7 +290,7 @@ app.get('/api/admin/system', verifyToken, requireAdmin, async (req, res) => {
     res.set('Cache-Control','no-store');
     res.json({
       ok:true,
-      api:{version:'10.3.0', node:process.version, environment:process.env.NODE_ENV || 'production'},
+      api:{version:'11.0.0', node:process.version, environment:process.env.NODE_ENV || 'production'},
       firebase:{projectId:process.env.FIREBASE_PROJECT_ID || null, configured:Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_JSON)},
       provider:{configured:Boolean(process.env.PROVIDER_API_URL && process.env.PROVIDER_API_KEY), baseUrl:process.env.PROVIDER_API_URL || null},
       telegram:{configured:Boolean(String(process.env.ADMIN_TELEGRAM_BOT_TOKEN || '').trim()), chatConfigured:Boolean(String(process.env.ADMIN_TELEGRAM_CHAT_ID || '').trim())},
@@ -381,71 +388,62 @@ app.post('/api/admin/users/balance', verifyToken, requireAdmin, async (req,res) 
 
 async function adminDashboard(db) {
   const warnings = [];
+  const result = {
+    users: 0, orders: 0, deposits: 0, popups: 0,
+    completed: 0, processing: 0, canceled: 0,
+    orderRevenue: 0, completedRevenue: 0, approvedDepositCredit: 0,
+    warnings
+  };
 
-  async function readCollection(name) {
+  async function safeCount(name) {
     try {
-      return await db.collection(name).get();
+      const snap = await db.collection(name).count().get();
+      return Number(snap.data()?.count || 0);
     } catch (error) {
-      const code = error?.code || 'unknown';
-      const message = error?.message || String(error);
-      console.error(`dashboard read ${name}:`, code, message);
-      warnings.push(`${name}: ${code}`);
+      console.error(`dashboard count ${name}:`, error?.code || 'unknown', error?.message || error);
+      warnings.push(`${name}: ${error?.code || 'unavailable'}`);
+      return 0;
+    }
+  }
+
+  async function safeDocs(name, limit = 500) {
+    try {
+      return await db.collection(name).limit(limit).get();
+    } catch (error) {
+      console.error(`dashboard read ${name}:`, error?.code || 'unknown', error?.message || error);
+      warnings.push(`${name}: ${error?.code || 'unavailable'}`);
       return null;
     }
   }
 
-  const [usersSnap, ordersSnap, depositsSnap, popupsSnap] = await Promise.all([
-    readCollection('users'),
-    readCollection('orders'),
-    readCollection('deposits'),
-    readCollection('popups')
+  const [users, orders, deposits, popups] = await Promise.all([
+    safeCount('users'), safeCount('orders'), safeCount('deposits'), safeCount('popups')
   ]);
+  result.users = users; result.orders = orders; result.deposits = deposits; result.popups = popups;
 
-  const orderDocs = ordersSnap?.docs || [];
-  const depositDocs = depositsSnap?.docs || [];
-
-  let completed = 0;
-  let processing = 0;
-  let canceled = 0;
-  let orderRevenue = 0;
-  let completedRevenue = 0;
-  let depositCredited = 0;
-
-  for (const doc of orderDocs) {
+  const [orderSnap, depositSnap] = await Promise.all([safeDocs('orders', 1000), safeDocs('deposits', 1000)]);
+  for (const doc of orderSnap?.docs || []) {
     const data = doc.data() || {};
     const status = String(data.status || '').trim().toLowerCase();
     const value = Number(data.totalPrice || 0);
-    if (status === 'completed') completed += 1;
-    else if (['pending', 'in progress', 'partial', 'processing'].includes(status)) processing += 1;
-    else if (['canceled', 'cancelled'].includes(status)) canceled += 1;
+    if (status === 'completed') result.completed += 1;
+    else if (['pending','in progress','partial','processing'].includes(status)) result.processing += 1;
+    else if (['canceled','cancelled'].includes(status)) result.canceled += 1;
     if (Number.isFinite(value) && value >= 0) {
-      orderRevenue += value;
-      if (status === 'completed') completedRevenue += value;
+      result.orderRevenue += value;
+      if (status === 'completed') result.completedRevenue += value;
     }
   }
-
-  for (const doc of depositDocs) {
+  for (const doc of depositSnap?.docs || []) {
     const data = doc.data() || {};
     const value = Number(data.creditedAmount || 0);
     const status = String(data.status || '').trim().toLowerCase();
-    if (['đã duyệt', 'approved', 'completed'].includes(status) && Number.isFinite(value)) {
-      depositCredited += value;
-    }
+    if (['đã duyệt','approved','completed'].includes(status) && Number.isFinite(value)) result.approvedDepositCredit += value;
   }
-
-  return {
-    users: usersSnap?.size || 0,
-    orders: ordersSnap?.size || 0,
-    deposits: depositsSnap?.size || 0,
-    popups: popupsSnap?.size || 0,
-    completed,
-    processing,
-    canceled,
-    orderRevenue: roundMoney(orderRevenue),
-    completedRevenue: roundMoney(completedRevenue),
-    approvedDepositCredit: roundMoney(depositCredited),
-    warnings
-  };
+  result.orderRevenue = roundMoney(result.orderRevenue);
+  result.completedRevenue = roundMoney(result.completedRevenue);
+  result.approvedDepositCredit = roundMoney(result.approvedDepositCredit);
+  return result;
 }
 
 app.get('/api/admin/dashboard', verifyToken, requireAdmin, async (req, res) => {
@@ -463,12 +461,7 @@ app.get('/api/admin/dashboard', verifyToken, requireAdmin, async (req, res) => {
     res.json({ ok: true, ...dashboard, serviceSync: serializeData(syncData) });
   } catch (error) {
     console.error('admin dashboard:', error);
-    res.status(500).json({
-      ok: false,
-      error: 'Không thể tải dashboard Admin.',
-      code: error?.code || 'unknown',
-      detail: process.env.NODE_ENV === 'production' ? undefined : (error?.message || String(error))
-    });
+    res.status(200).json({ ok:true, degraded:true, error:'Dashboard đang ở chế độ dự phòng.', code:error?.code||'unknown', warnings:[error?.message||'Dashboard dependency unavailable'], users:0, orders:0, deposits:0, popups:0, completed:0, processing:0, canceled:0, orderRevenue:0, completedRevenue:0, approvedDepositCredit:0, serviceSync:{} });
   }
 });
 

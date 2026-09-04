@@ -141,8 +141,31 @@ async function getServices(forceRefresh = false, db = null) {
   return refreshPromise;
 }
 
+async function loadCatalogFallback(db) {
+  if (!db) return [];
+  try {
+    const snap = await db.collection('service_catalog').limit(2000).get();
+    const rows = snap.docs.map(d => d.data() || {}).filter(x => x.service != null);
+    return rows;
+  } catch (error) {
+    console.error('service catalog fallback:', error?.code || 'unknown', error?.message || error);
+    return [];
+  }
+}
+
 async function syncServices(db, forceRefresh = true) {
-  return getServices(forceRefresh, db);
+  try {
+    return await getServices(forceRefresh, db);
+  } catch (error) {
+    const fallback = await loadCatalogFallback(db);
+    if (fallback.length) {
+      cachedServices = fallback;
+      cachedAt = Date.now();
+      console.error('Provider sync failed; using Firestore catalog fallback:', error?.message || error);
+      return fallback;
+    }
+    throw error;
+  }
 }
 
 router.get('/', async (req, res) => {
@@ -173,4 +196,5 @@ router.get('/:serviceId', async (req, res) => {
 module.exports = router;
 module.exports.getServices = getServices;
 module.exports.syncServices = syncServices;
+module.exports.loadCatalogFallback = loadCatalogFallback;
 module.exports.normalizeService = normalizeService;
