@@ -138,7 +138,7 @@ app.locals.verifyToken = verifyToken;
 
 app.get('/health', (req, res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok: true, service: 'TDMS1VN', version: '10.0.0', time: new Date().toISOString() });
+  res.json({ ok: true, service: 'TDMS1VN', version: '10.1.0', time: new Date().toISOString() });
 });
 
 app.get('/api/health', (req,res) => {
@@ -173,7 +173,7 @@ app.get('/api', (req, res) => {
   res.json({
     ok: true,
     service: 'TDMS1VN API',
-    version: '10.0.0',
+    version: '10.1.0',
     frontend: 'https://tdms1vip.vercel.app',
     endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me', '/api/admin/session']
   });
