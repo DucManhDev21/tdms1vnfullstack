@@ -138,12 +138,12 @@ app.locals.verifyToken = verifyToken;
 
 app.get('/health', (req, res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok: true, service: 'TDMS1VN', version: '10.2.1', time: new Date().toISOString() });
+  res.json({ ok: true, service: 'TDMS1VN', version: '10.2.2', time: new Date().toISOString() });
 });
 
 app.get('/api/health', (req,res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok:true, service:'TDMS1VN API', version:'10.0.0', time:new Date().toISOString() });
+  res.json({ ok:true, service:'TDMS1VN API', version:'10.2.2', time:new Date().toISOString() });
 });
 
 app.get('/api/ping', (req,res) => res.json({ ok:true, time:new Date().toISOString() }));
@@ -302,60 +302,95 @@ app.post('/api/admin/users/balance', verifyToken, requireAdmin, async (req,res) 
 
 
 async function adminDashboard(db) {
-  const [usersCount, ordersCount, depositsCount, popupCount, completedCount, processingCount, canceledCount, orderSnap, depositSnap] = await Promise.all([
-    db.collection('users').count().get(),
-    db.collection('orders').count().get(),
-    db.collection('deposits').count().get(),
-    db.collection('popups').count().get(),
-    db.collection('orders').where('status', '==', 'Completed').count().get(),
-    db.collection('orders').where('status', 'in', ['Pending', 'In progress', 'Partial']).count().get(),
-    db.collection('orders').where('status', '==', 'Canceled').count().get(),
-    db.collection('orders').select('totalPrice', 'status').get(),
-    db.collection('deposits').select('creditedAmount', 'status').get()
+  const warnings = [];
+
+  async function readCollection(name) {
+    try {
+      return await db.collection(name).get();
+    } catch (error) {
+      const code = error?.code || 'unknown';
+      const message = error?.message || String(error);
+      console.error(`dashboard read ${name}:`, code, message);
+      warnings.push(`${name}: ${code}`);
+      return null;
+    }
+  }
+
+  const [usersSnap, ordersSnap, depositsSnap, popupsSnap] = await Promise.all([
+    readCollection('users'),
+    readCollection('orders'),
+    readCollection('deposits'),
+    readCollection('popups')
   ]);
 
+  const orderDocs = ordersSnap?.docs || [];
+  const depositDocs = depositsSnap?.docs || [];
+
+  let completed = 0;
+  let processing = 0;
+  let canceled = 0;
   let orderRevenue = 0;
   let completedRevenue = 0;
   let depositCredited = 0;
 
-  for (const doc of orderSnap.docs) {
+  for (const doc of orderDocs) {
     const data = doc.data() || {};
+    const status = String(data.status || '').trim().toLowerCase();
     const value = Number(data.totalPrice || 0);
+    if (status === 'completed') completed += 1;
+    else if (['pending', 'in progress', 'partial', 'processing'].includes(status)) processing += 1;
+    else if (['canceled', 'cancelled'].includes(status)) canceled += 1;
     if (Number.isFinite(value) && value >= 0) {
       orderRevenue += value;
-      if (data.status === 'Completed') completedRevenue += value;
+      if (status === 'completed') completedRevenue += value;
     }
   }
 
-  for (const doc of depositSnap.docs) {
+  for (const doc of depositDocs) {
     const data = doc.data() || {};
     const value = Number(data.creditedAmount || 0);
-    if (data.status === 'Đã duyệt' && Number.isFinite(value)) depositCredited += value;
+    const status = String(data.status || '').trim().toLowerCase();
+    if (['đã duyệt', 'approved', 'completed'].includes(status) && Number.isFinite(value)) {
+      depositCredited += value;
+    }
   }
 
   return {
-    users: usersCount.data().count,
-    orders: ordersCount.data().count,
-    deposits: depositsCount.data().count,
-    popups: popupCount.data().count,
-    completed: completedCount.data().count,
-    processing: processingCount.data().count,
-    canceled: canceledCount.data().count,
+    users: usersSnap?.size || 0,
+    orders: ordersSnap?.size || 0,
+    deposits: depositsSnap?.size || 0,
+    popups: popupsSnap?.size || 0,
+    completed,
+    processing,
+    canceled,
     orderRevenue: roundMoney(orderRevenue),
     completedRevenue: roundMoney(completedRevenue),
-    approvedDepositCredit: roundMoney(depositCredited)
+    approvedDepositCredit: roundMoney(depositCredited),
+    warnings
   };
 }
 
 app.get('/api/admin/dashboard', verifyToken, requireAdmin, async (req, res) => {
   try {
     const dashboard = await adminDashboard(db);
-    const serviceSync = await db.collection('system').doc('serviceSync').get();
-    const syncData = serviceSync.exists ? serviceSync.data() || {} : {};
+    let syncData = {};
+    try {
+      const serviceSync = await db.collection('system').doc('serviceSync').get();
+      syncData = serviceSync.exists ? serviceSync.data() || {} : {};
+    } catch (error) {
+      console.error('dashboard serviceSync:', error?.code || 'unknown', error?.message || error);
+      dashboard.warnings.push(`system/serviceSync: ${error?.code || 'unknown'}`);
+    }
+    res.set('Cache-Control', 'no-store');
     res.json({ ok: true, ...dashboard, serviceSync: serializeData(syncData) });
   } catch (error) {
     console.error('admin dashboard:', error);
-    res.status(500).json({ ok: false, error: 'Không thể tải dashboard Admin.' });
+    res.status(500).json({
+      ok: false,
+      error: 'Không thể tải dashboard Admin.',
+      code: error?.code || 'unknown',
+      detail: process.env.NODE_ENV === 'production' ? undefined : (error?.message || String(error))
+    });
   }
 });
 
