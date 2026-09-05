@@ -158,10 +158,9 @@ async function deletePopup(db,id) {
   await db.runTransaction(async tx=>{const snap=await tx.get(ref);if(!snap.exists)throw new Error(`Không tìm thấy popup ${id}.`);tx.delete(ref);});
 }
 async function sendHelp(chatId) {
-  return telegram('sendMessage',{chat_id:chatId,text:'<b>TDMS1VN ADMIN BOT</b>\n\n/pay username số_tiền\n/take username số_tiền\n/syncorders\n/syncservices\n/stats\n/addpopup ID | Tiêu đề | Nội dung\n/deletepopup ID\n/addadmin email@gmail.com\n/deleteadmin email@gmail.com\n/listadmin\n/help\n\nVí dụ:\n/pay hung123 50000\n/take hung123 50000\n/addpopup TB1 | Khuyến mãi | Nội dung thông báo\n/deletepopup TB1\n/addadmin admin2@gmail.com\n/deleteadmin admin2@gmail.com\n/listadmin',parse_mode:'HTML'});
+  return telegram('sendMessage',{chat_id:chatId,text:'<b>TDMS1VN V10 ADMIN BOT</b>\n\n/pay username số_tiền\n/take username số_tiền\n/syncorders\n/syncservices\n/stats\n/addpopup ID | Tiêu đề | Nội dung\n/deletepopup ID\n/addadmin email@gmail.com\n/deleteadmin email@gmail.com\n/listadmin\n/help\n\nVí dụ:\n/pay hung123 50000\n/take hung123 50000\n/addpopup TB1 | Khuyến mãi | Nội dung thông báo\n/deletepopup TB1\n/addadmin admin2@gmail.com\n/deleteadmin admin2@gmail.com\n/listadmin',parse_mode:'HTML'});
 }
 async function handleMessage(message,db,admin) {
-try {
   const chatId=String(message?.chat?.id||''); const text=String(message?.text||'').trim(); if(!text.startsWith('/'))return;
   const command=text.split(/\s+/)[0].split('@')[0].toLowerCase();
   if(command==='/start'||command==='/help')return sendHelp(chatId);
@@ -187,25 +186,18 @@ try {
     return telegram('sendMessage',{chat_id:chatId,text:`✅ <b>ĐỒNG BỘ SERVICE</b>\n\nSố service đang mở: <b>${services.length}</b>\nMarkup mặc định: <b>${esc(process.env.SERVICE_MARKUP_PERCENT || 0)}%</b>`,parse_mode:'HTML'});
   }
   if(command==='/stats'){
-    const safeCount = async (queryFactory) => { try { const snap = await queryFactory().count().get(); return Number(snap.data()?.count || 0); } catch (error) { console.error('bot stats count:', error); return null; } };
-    const [users,orders,pending,completed,deposits] = await Promise.all([
-      safeCount(() => db.collection('users')),
-      safeCount(() => db.collection('orders')),
-      safeCount(() => db.collection('orders').where('status','in',['Pending','In progress','Partial'])),
-      safeCount(() => db.collection('orders').where('status','==','Completed')),
-      safeCount(() => db.collection('deposits'))
+    const [users,orders,pending,completed,deposits]=await Promise.all([
+      db.collection('users').count().get(),
+      db.collection('orders').count().get(),
+      db.collection('orders').where('status','in',['Pending','In progress','Partial']).count().get(),
+      db.collection('orders').where('status','==','Completed').count().get(),
+      db.collection('deposits').count().get()
     ]);
-    const value = v => v == null ? 'N/A' : String(v);
-    return telegram('sendMessage',{chat_id:chatId,text:`📊 <b>TDMS1VN ADMIN</b>\n\n👤 Users: <b>${value(users)}</b>\n📦 Orders: <b>${value(orders)}</b>\n⏳ Đang chạy: <b>${value(pending)}</b>\n✅ Completed: <b>${value(completed)}</b>\n💰 Deposit requests: <b>${value(deposits)}</b>`,parse_mode:'HTML'});
+    return telegram('sendMessage',{chat_id:chatId,text:`📊 <b>TDMS1VN V10</b>\n\n👤 Users: <b>${users.data().count}</b>\n📦 Orders: <b>${orders.data().count}</b>\n⏳ Đang chạy: <b>${pending.data().count}</b>\n✅ Completed: <b>${completed.data().count}</b>\n💰 Deposit requests: <b>${deposits.data().count}</b>`,parse_mode:'HTML'});
   }
   if(command==='/addpopup'){const data=parseAddPopup(text);await addPopup(db,admin,data);return telegram('sendMessage',{chat_id:chatId,text:`✅ <b>ĐÃ THÊM POPUP</b>\n\n🆔 ID: <code>${esc(data.id)}</code>\n📌 Tiêu đề: <b>${esc(data.title)}</b>\n📝 Nội dung: ${esc(data.content)}`,parse_mode:'HTML'});}
   if(command==='/deletepopup'){const id=parseDeletePopup(text);await deletePopup(db,id);return telegram('sendMessage',{chat_id:chatId,text:`🗑️ Đã xóa popup <code>${esc(id)}</code>.`,parse_mode:'HTML'});}
   return sendHelp(chatId);
-} catch (error) {
-    console.error('Admin bot command failure:', error?.code || 'unknown', error?.message || error);
-    const friendly = String(error?.message || 'Có lỗi tạm thời. Vui lòng thử lại sau.');
-    return telegram('sendMessage',{chat_id:chatId,text:`❌ <b>Không thể thực hiện lệnh</b>\n\n<code>${esc(friendly.slice(0,900))}</code>`,parse_mode:'HTML'}).catch(sendError => console.error('bot error reply:', sendError?.message || sendError));
-  }
 }
 async function handleUpdate(update,db,admin){if(!update?.message)return;const chatId=String(update.message.chat?.id||'');if(!isAuthorized(update)){if(chatId)await telegram('sendMessage',{chat_id:chatId,text:'⛔ Bạn không có quyền sử dụng bot admin.'}).catch(()=>{});return;}try{await handleMessage(update.message,db,admin);}catch(error){console.error('Admin bot command:',error);await telegram('sendMessage',{chat_id:chatId,text:`❌ ${error.message||'Có lỗi xảy ra.'}`}).catch(()=>{});}}
 async function startAdminBot(db,admin){
