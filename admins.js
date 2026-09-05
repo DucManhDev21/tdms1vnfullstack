@@ -18,6 +18,27 @@ function ownerEmail() {
   return normalizeEmail(process.env.ADMIN_EMAIL || '');
 }
 
+async function syncAdminClaim(admin, email, enabled) {
+  const normalized = validateEmail(email);
+  try {
+    const user = await admin.auth().getUserByEmail(normalized);
+    const current = user.customClaims && typeof user.customClaims === 'object' ? { ...user.customClaims } : {};
+    if (enabled) {
+      current.admin = true;
+      current.role = 'admin';
+    } else {
+      delete current.admin;
+      if (current.role === 'admin') delete current.role;
+    }
+    await admin.auth().setCustomUserClaims(user.uid, current);
+    return { found: true, uid: user.uid };
+  } catch (error) {
+    if (error?.code === 'auth/user-not-found') return { found: false };
+    console.error('sync admin custom claim:', error?.code || 'unknown', error?.message || error);
+    return { found: false, error: error?.message || 'claim sync failed' };
+  }
+}
+
 async function ensureOwnerAdmin(db, admin) {
   const email = ownerEmail();
   if (!email) {
@@ -34,13 +55,11 @@ async function ensureOwnerAdmin(db, admin) {
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   };
   if (!snap.exists) {
-    await ref.set({
-      ...base,
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
-    });
+    await ref.set({ ...base, createdAt: admin.firestore.FieldValue.serverTimestamp() });
   } else if (snap.data()?.active !== true || snap.data()?.owner !== true) {
     await ref.set(base, { merge: true });
   }
+  await syncAdminClaim(admin, email, true);
   return email;
 }
 
@@ -68,7 +87,7 @@ async function addAdmin(db, admin, email, actor = {}) {
       email: normalized,
       active: true,
       owner: current.owner === true,
-      source: current.source || 'telegram',
+      source: current.source || 'manual',
       reactivatedAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     }, { merge: true });
@@ -77,17 +96,19 @@ async function addAdmin(db, admin, email, actor = {}) {
       email: normalized,
       active: true,
       owner: normalized === ownerEmail(),
-      source: 'telegram',
-      addedBy: actor.email || actor.telegramUserId || 'telegram',
+      source: actor.source || 'manual',
+      addedBy: actor.email || actor.telegramUserId || 'manual',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
   }
+  const claim = await syncAdminClaim(admin, normalized, true);
   await db.collection('admin_audit_logs').add({
     action: 'add_admin',
     targetEmail: normalized,
-    actor: actor.email || actor.telegramUserId || 'telegram',
-    source: actor.source || 'telegram',
+    actor: actor.email || actor.telegramUserId || 'manual',
+    source: actor.source || 'manual',
+    claimSynced: claim.found === true,
     createdAt: admin.firestore.FieldValue.serverTimestamp()
   });
   return getAdmin(db, normalized);
@@ -95,9 +116,7 @@ async function addAdmin(db, admin, email, actor = {}) {
 
 async function deleteAdmin(db, admin, email, actor = {}) {
   const normalized = validateEmail(email);
-  if (normalized === ownerEmail()) {
-    throw new Error('Không thể xóa Admin chủ hệ thống trong ADMIN_EMAIL.');
-  }
+  if (normalized === ownerEmail()) throw new Error('Không thể xóa Admin chủ hệ thống trong ADMIN_EMAIL.');
   const ref = db.collection('admins').doc(normalized);
   const snap = await ref.get();
   if (!snap.exists) throw new Error(`Không tìm thấy Admin ${normalized}.`);
@@ -108,11 +127,13 @@ async function deleteAdmin(db, admin, email, actor = {}) {
     deletedAt: admin.firestore.FieldValue.serverTimestamp(),
     updatedAt: admin.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
+  const claim = await syncAdminClaim(admin, normalized, false);
   await db.collection('admin_audit_logs').add({
     action: 'delete_admin',
     targetEmail: normalized,
-    actor: actor.email || actor.telegramUserId || 'telegram',
-    source: actor.source || 'telegram',
+    actor: actor.email || actor.telegramUserId || 'manual',
+    source: actor.source || 'manual',
+    claimSynced: claim.found === true,
     createdAt: admin.firestore.FieldValue.serverTimestamp()
   });
   return normalized;
@@ -126,14 +147,4 @@ async function listAdmins(db) {
     .sort((a, b) => String(a.email || '').localeCompare(String(b.email || '')));
 }
 
-module.exports = {
-  normalizeEmail,
-  validateEmail,
-  ownerEmail,
-  ensureOwnerAdmin,
-  getAdmin,
-  isAdmin,
-  addAdmin,
-  deleteAdmin,
-  listAdmins
-};
+module.exports = { normalizeEmail, validateEmail, ownerEmail, ensureOwnerAdmin, getAdmin, isAdmin, addAdmin, deleteAdmin, listAdmins, syncAdminClaim };

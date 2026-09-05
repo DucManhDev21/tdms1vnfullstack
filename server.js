@@ -136,14 +136,35 @@ async function verifyToken(req, res, next) {
 
 app.locals.verifyToken = verifyToken;
 
+function errorInfo(error) {
+  return { code: error?.code || error?.name || 'UNKNOWN_ERROR', message: String(error?.message || 'Unknown error') };
+}
+function serializeDeep(value, seen = new WeakSet()) {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'bigint') return Number(value);
+  if (value instanceof Date || (value && typeof value.toDate === 'function')) {
+    try { return value instanceof Date ? value.toISOString() : value.toDate().toISOString(); } catch { return String(value); }
+  }
+  if (typeof value !== 'object') return value;
+  if (seen.has(value)) return '[Circular]';
+  seen.add(value);
+  if (Array.isArray(value)) return value.map(v => serializeDeep(v, seen));
+  const out={}; for (const [k,v] of Object.entries(value)) out[k]=serializeDeep(v,seen); return out;
+}
+function jsonSafe(res,payload,status=200){
+  try{return res.status(status).json(serializeDeep(payload));}
+  catch(error){console.error('json serialization failure:',errorInfo(error));return res.status(200).json({ok:true,degraded:true,code:'JSON_SERIALIZATION_FALLBACK',error:'Không thể tuần tự hóa một phần dữ liệu.'});}
+}
+
+
 app.get('/health', (req, res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok: true, service: 'TDMS1VN', version: '11.0.0', time: new Date().toISOString() });
+  res.json({ ok: true, service: 'TDMS1VN', version: '11.2.0', time: new Date().toISOString() });
 });
 
 app.get('/api/health', (req,res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok:true, service:'TDMS1VN API', version:'11.0.0', time:new Date().toISOString() });
+  res.json({ ok:true, service:'TDMS1VN API', version:'11.2.0', time:new Date().toISOString() });
 });
 
 app.get('/api/ping', (req,res) => res.json({ ok:true, time:new Date().toISOString() }));
@@ -173,9 +194,9 @@ app.get('/api', (req, res) => {
   res.json({
     ok: true,
     service: 'TDMS1VN API',
-    version: '11.0.0',
+    version: '11.2.0',
     frontend: 'https://tdms1vip.vercel.app',
-    endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me', '/api/admin/session']
+    endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me', '/api/admin/session','/api/admin/dashboard','/api/admin/diagnostics','/api/admin/orders/sync']
   });
 });
 
@@ -290,7 +311,7 @@ app.get('/api/admin/system', verifyToken, requireAdmin, async (req, res) => {
     res.set('Cache-Control','no-store');
     res.json({
       ok:true,
-      api:{version:'11.0.0', node:process.version, environment:process.env.NODE_ENV || 'production'},
+      api:{version:'11.2.0', node:process.version, environment:process.env.NODE_ENV || 'production'},
       firebase:{projectId:process.env.FIREBASE_PROJECT_ID || null, configured:Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_JSON)},
       provider:{configured:Boolean(process.env.PROVIDER_API_URL && process.env.PROVIDER_API_KEY), baseUrl:process.env.PROVIDER_API_URL || null},
       telegram:{configured:Boolean(String(process.env.ADMIN_TELEGRAM_BOT_TOKEN || '').trim()), chatConfigured:Boolean(String(process.env.ADMIN_TELEGRAM_CHAT_ID || '').trim())},
@@ -313,7 +334,7 @@ app.get('/api/admin/users', verifyToken, requireAdmin, async (req,res) => {
     const limit = Math.min(Math.max(Number.parseInt(req.query.limit || '100',10) || 100,1),200);
     const snap = await db.collection('users').limit(limit).get();
     res.json({ ok:true, total:snap.size, items:snap.docs.map(serializeDoc) });
-  } catch(error) { console.error('admin users:',error); res.status(500).json({ok:false,error:'Không thể tải người dùng.'}); }
+  } catch(error) { console.error('admin users:',error); return jsonSafe(res,{ok:true,degraded:true,total:0,items:[],warnings:[errorInfo(error).message],code:errorInfo(error).code},200); }
 });
 
 app.get('/api/admin/orders', verifyToken, requireAdmin, async (req,res) => {
@@ -321,7 +342,7 @@ app.get('/api/admin/orders', verifyToken, requireAdmin, async (req,res) => {
     const limit = Math.min(Math.max(Number.parseInt(req.query.limit || '100',10) || 100,1),200);
     const snap = await db.collection('orders').limit(limit).get();
     res.json({ ok:true, total:snap.size, items:snap.docs.map(serializeDoc).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||''))) });
-  } catch(error) { console.error('admin orders:',error); res.status(500).json({ok:false,error:'Không thể tải đơn hàng.'}); }
+  } catch(error) { console.error('admin orders:',error); return jsonSafe(res,{ok:true,degraded:true,total:0,items:[],warnings:[errorInfo(error).message],code:errorInfo(error).code},200); }
 });
 
 app.get('/api/admin/deposits', verifyToken, requireAdmin, async (req,res) => {
@@ -330,7 +351,7 @@ app.get('/api/admin/deposits', verifyToken, requireAdmin, async (req,res) => {
     const snap = await db.collection('deposits').limit(limit).get();
     const items = snap.docs.map(serializeDoc).map(x=>{ delete x.code; return x; }).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
     res.json({ ok:true, total:items.length, items });
-  } catch(error) { console.error('admin deposits:',error); res.status(500).json({ok:false,error:'Không thể tải yêu cầu nạp tiền.'}); }
+  } catch(error) { console.error('admin deposits:',error); return jsonSafe(res,{ok:true,degraded:true,total:0,items:[],warnings:[errorInfo(error).message],code:errorInfo(error).code},200); }
 });
 
 app.get('/api/admin/popups', verifyToken, requireAdmin, async (req,res) => {
@@ -338,7 +359,7 @@ app.get('/api/admin/popups', verifyToken, requireAdmin, async (req,res) => {
     const snap = await db.collection('popups').limit(50).get();
     const items = snap.docs.map(serializeDoc).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
     res.json({ok:true,total:items.length,items});
-  } catch(error) { console.error('admin popups:',error); res.status(500).json({ok:false,error:'Không thể tải Popup.'}); }
+  } catch(error) { console.error('admin popups:',error); return jsonSafe(res,{ok:true,degraded:true,total:0,items:[],warnings:[errorInfo(error).message],code:errorInfo(error).code},200); }
 });
 
 app.post('/api/admin/popups', verifyToken, requireAdmin, async (req,res) => {
@@ -387,91 +408,44 @@ app.post('/api/admin/users/balance', verifyToken, requireAdmin, async (req,res) 
 
 
 async function adminDashboard(db) {
-  const warnings = [];
-  const result = {
-    users: 0, orders: 0, deposits: 0, popups: 0,
-    completed: 0, processing: 0, canceled: 0,
-    orderRevenue: 0, completedRevenue: 0, approvedDepositCredit: 0,
-    warnings
-  };
-
-  async function safeCount(name) {
-    try {
-      const snap = await db.collection(name).count().get();
-      return Number(snap.data()?.count || 0);
-    } catch (error) {
-      console.error(`dashboard count ${name}:`, error?.code || 'unknown', error?.message || error);
-      warnings.push(`${name}: ${error?.code || 'unavailable'}`);
-      return 0;
-    }
+  const warnings=[];
+  const result={users:0,orders:0,deposits:0,popups:0,completed:0,processing:0,canceled:0,orderRevenue:0,completedRevenue:0,approvedDepositCredit:0,warnings};
+  async function safeCount(name){
+    try{const c=db.collection(name);if(typeof c.count==='function'){try{const x=await c.count().get();return Number(x.data()?.count||0);}catch(error){warnings.push(`${name}:count:${errorInfo(error).code}`);}}const x=await c.limit(5000).get();if(x.size>=5000)warnings.push(`${name}:estimate_limited_5000`);return x.size;}
+    catch(error){warnings.push(`${name}:unavailable:${errorInfo(error).code}`);return 0;}
   }
-
-  async function safeDocs(name, limit = 500) {
-    try {
-      return await db.collection(name).limit(limit).get();
-    } catch (error) {
-      console.error(`dashboard read ${name}:`, error?.code || 'unknown', error?.message || error);
-      warnings.push(`${name}: ${error?.code || 'unavailable'}`);
-      return null;
-    }
-  }
-
-  const [users, orders, deposits, popups] = await Promise.all([
-    safeCount('users'), safeCount('orders'), safeCount('deposits'), safeCount('popups')
-  ]);
-  result.users = users; result.orders = orders; result.deposits = deposits; result.popups = popups;
-
-  const [orderSnap, depositSnap] = await Promise.all([safeDocs('orders', 1000), safeDocs('deposits', 1000)]);
-  for (const doc of orderSnap?.docs || []) {
-    const data = doc.data() || {};
-    const status = String(data.status || '').trim().toLowerCase();
-    const value = Number(data.totalPrice || 0);
-    if (status === 'completed') result.completed += 1;
-    else if (['pending','in progress','partial','processing'].includes(status)) result.processing += 1;
-    else if (['canceled','cancelled'].includes(status)) result.canceled += 1;
-    if (Number.isFinite(value) && value >= 0) {
-      result.orderRevenue += value;
-      if (status === 'completed') result.completedRevenue += value;
-    }
-  }
-  for (const doc of depositSnap?.docs || []) {
-    const data = doc.data() || {};
-    const value = Number(data.creditedAmount || 0);
-    const status = String(data.status || '').trim().toLowerCase();
-    if (['đã duyệt','approved','completed'].includes(status) && Number.isFinite(value)) result.approvedDepositCredit += value;
-  }
-  result.orderRevenue = roundMoney(result.orderRevenue);
-  result.completedRevenue = roundMoney(result.completedRevenue);
-  result.approvedDepositCredit = roundMoney(result.approvedDepositCredit);
-  return result;
+  async function safeDocs(name,limit=2000){try{const x=await db.collection(name).limit(limit).get();if(x.size>=limit)warnings.push(`${name}:snapshot_limit_${limit}`);return x;}catch(error){warnings.push(`${name}:unavailable:${errorInfo(error).code}`);return null;}}
+  const counts=await Promise.allSettled([safeCount('users'),safeCount('orders'),safeCount('deposits'),safeCount('popups')]);
+  result.users=counts[0].status==='fulfilled'?counts[0].value:0;result.orders=counts[1].status==='fulfilled'?counts[1].value:0;result.deposits=counts[2].status==='fulfilled'?counts[2].value:0;result.popups=counts[3].status==='fulfilled'?counts[3].value:0;
+  const [or,dr]=await Promise.allSettled([safeDocs('orders'),safeDocs('deposits')]);
+  for(const doc of (or.status==='fulfilled'?or.value:null)?.docs||[]){try{const d=doc.data()||{},st=String(d.status||'').trim().toLowerCase(),v=Number(d.totalPrice??d.price??0);if(st==='completed')result.completed++;else if(['pending','in progress','partial','processing'].includes(st))result.processing++;else if(['canceled','cancelled'].includes(st))result.canceled++;if(Number.isFinite(v)&&v>=0){result.orderRevenue+=v;if(st==='completed')result.completedRevenue+=v;}}catch{warnings.push(`order:${doc.id}:invalid`);}}
+  for(const doc of (dr.status==='fulfilled'?dr.value:null)?.docs||[]){try{const d=doc.data()||{},v=Number(d.creditedAmount??d.amount??0),st=String(d.status||'').trim().toLowerCase();if(['đã duyệt','approved','completed'].includes(st)&&Number.isFinite(v))result.approvedDepositCredit+=v;}catch{warnings.push(`deposit:${doc.id}:invalid`);}}
+  result.orderRevenue=roundMoney(result.orderRevenue);result.completedRevenue=roundMoney(result.completedRevenue);result.approvedDepositCredit=roundMoney(result.approvedDepositCredit);return result;
 }
 
-app.get('/api/admin/dashboard', verifyToken, requireAdmin, async (req, res) => {
-  try {
-    const dashboard = await adminDashboard(db);
-    let syncData = {};
-    try {
-      const serviceSync = await db.collection('system').doc('serviceSync').get();
-      syncData = serviceSync.exists ? serviceSync.data() || {} : {};
-    } catch (error) {
-      console.error('dashboard serviceSync:', error?.code || 'unknown', error?.message || error);
-      dashboard.warnings.push(`system/serviceSync: ${error?.code || 'unknown'}`);
-    }
-    res.set('Cache-Control', 'no-store');
-    res.json({ ok: true, ...dashboard, serviceSync: serializeData(syncData) });
-  } catch (error) {
-    console.error('admin dashboard:', error);
-    res.status(200).json({ ok:true, degraded:true, error:'Dashboard đang ở chế độ dự phòng.', code:error?.code||'unknown', warnings:[error?.message||'Dashboard dependency unavailable'], users:0, orders:0, deposits:0, popups:0, completed:0, processing:0, canceled:0, orderRevenue:0, completedRevenue:0, approvedDepositCredit:0, serviceSync:{} });
-  }
+app.get('/api/admin/dashboard', verifyToken, requireAdmin, async (req,res)=>{
+  const safe={ok:true,degraded:false,users:0,orders:0,deposits:0,popups:0,completed:0,processing:0,canceled:0,orderRevenue:0,completedRevenue:0,approvedDepositCredit:0,serviceSync:{},warnings:[]};
+  try{Object.assign(safe,await adminDashboard(db));}catch(error){console.error('admin dashboard core:',errorInfo(error));safe.degraded=true;safe.warnings.push(`core:${errorInfo(error).code}`);}
+  try{const snap=await db.collection('system').doc('serviceSync').get();safe.serviceSync=snap.exists?serializeData(snap.data()||{}):{};}catch(error){console.error('dashboard serviceSync:',errorInfo(error));safe.degraded=true;safe.warnings.push(`system/serviceSync:${errorInfo(error).code}`);}
+  safe.degraded=Boolean(safe.degraded||safe.warnings.length);safe.generatedAt=new Date().toISOString();res.set('Cache-Control','no-store');return jsonSafe(res,safe,200);
+});
+
+app.get('/api/admin/diagnostics', verifyToken, requireAdmin, async (req,res)=>{
+  const r={ok:true,version:'11.2.0',node:process.version,environment:process.env.NODE_ENV||'production',checks:{},warnings:[]};
+  r.checks.firebaseAuth={configured:Boolean(admin.apps.length)};r.checks.adminEmail={configured:Boolean(ADMIN_EMAIL),value:ADMIN_EMAIL||null};
+  r.checks.provider={configured:Boolean(String(process.env.PROVIDER_API_URL||'').trim()&&String(process.env.PROVIDER_API_KEY||'').trim()),baseUrl:String(process.env.PROVIDER_API_URL||'').trim()||null};
+  r.checks.telegram={configured:Boolean(String(process.env.ADMIN_TELEGRAM_BOT_TOKEN||'').trim()),chatConfigured:Boolean(String(process.env.ADMIN_TELEGRAM_CHAT_ID||'').trim())};
+  try{await db.collection('admins').limit(1).get();r.checks.firestore={reachable:true};}catch(error){r.checks.firestore={reachable:false,code:errorInfo(error).code,message:errorInfo(error).message};r.warnings.push('Firestore unavailable');}
+  try{const x=await db.collection('service_catalog').limit(1).get();r.checks.serviceCatalog={reachable:true,hasData:!x.empty};}catch(error){r.checks.serviceCatalog={reachable:false,code:errorInfo(error).code};r.warnings.push('Service catalog unavailable');}
+  r.degraded=r.warnings.length>0;return jsonSafe(res,r,200);
+});
+
+app.post('/api/admin/orders/sync', verifyToken, requireAdmin, async (req,res)=>{
+  try{return jsonSafe(res,{ok:true,...(await cronModule.runScheduledSync(db,admin))},200);}catch(error){console.error('admin order sync:',errorInfo(error));return jsonSafe(res,{ok:true,degraded:true,code:'ORDER_SYNC_UNAVAILABLE',error:errorInfo(error).message,checked:0,updated:0,refunded:0},200);}
 });
 
 function serializeData(data) {
-  const result = { ...(data || {}) };
-  for (const key of Object.keys(result)) {
-    const value = result[key];
-    if (value && typeof value.toDate === 'function') result[key] = value.toDate().toISOString();
-  }
-  return result;
+  const result={...(data||{})};for(const key of Object.keys(result)){const value=result[key];if(value&&typeof value.toDate==='function')result[key]=value.toDate().toISOString();}return result;
 }
 
 app.get('/api/admin/services', verifyToken, requireAdmin, async (req, res) => {
@@ -482,17 +456,18 @@ app.get('/api/admin/services', verifyToken, requireAdmin, async (req, res) => {
     res.json({ ok: true, total: items.length, items, defaultMarkupPercent: Number(process.env.SERVICE_MARKUP_PERCENT || 0) });
   } catch (error) {
     console.error('admin services:', error);
-    res.status(502).json({ ok: false, error: 'Không thể tải service catalog.' });
+    return jsonSafe(res,{ok:true,degraded:true,total:0,items:[],warnings:[errorInfo(error).message],code:'SERVICE_CATALOG_UNAVAILABLE'},200);
   }
 });
 
 app.post('/api/admin/services/sync', verifyToken, requireAdmin, async (req, res) => {
   try {
-    const services = await servicesModule.syncServices(db, true);
+    const services = await cronModule.withFirestoreLock(db, admin, 'service-sync', () => servicesModule.syncServices(db, true));
+    if (services?.skipped) return jsonSafe(res,{ok:true,skipped:true,degraded:true,code:'SERVICE_SYNC_ALREADY_RUNNING',serviceCount:0},200);
     res.json({ ok: true, serviceCount: services.length, markupPercent: Number(process.env.SERVICE_MARKUP_PERCENT || 0), syncedAt: new Date().toISOString() });
   } catch (error) {
     console.error('admin service sync:', error);
-    res.status(502).json({ ok: false, error: 'Không đồng bộ được dịch vụ từ Provider.' });
+    return jsonSafe(res,{ok:true,degraded:true,serviceCount:0,items:[],providerUnavailable:true,code:'PROVIDER_UNAVAILABLE',error:errorInfo(error).message},200);
   }
 });
 
