@@ -1,12 +1,10 @@
-'use strict';
-
 const express = require('express');
-const crypto = require('crypto');
 const router = express.Router();
 const { syncOrders } = require('./order-sync');
 const { syncServices } = require('./services');
 
-const LOCK_TTL_MS = Math.min(Math.max(Number(process.env.SYNC_LOCK_TTL_MS || 10 * 60 * 1000), 60_000), 30 * 60 * 1000);
+let syncRunning = false;
+let serviceSyncRunning = false;
 
 function cronGuard(req, res, next) {
   const secret = String(process.env.CRON_SECRET || '').trim();
@@ -16,49 +14,25 @@ function cronGuard(req, res, next) {
   next();
 }
 
-async function withFirestoreLock(db, admin, name, fn) {
-  const ref = db.collection('system_locks').doc(name);
-  const owner = crypto.randomUUID();
-  const now = Date.now();
-  const expiresAtMs = now + LOCK_TTL_MS;
-  const acquired = await db.runTransaction(async tx => {
-    const snap = await tx.get(ref);
-    const data = snap.exists ? (snap.data() || {}) : {};
-    const currentExpiry = data.expiresAt?.toMillis ? data.expiresAt.toMillis() : Number(data.expiresAtMs || 0);
-    if (data.owner && currentExpiry > now) return false;
-    tx.set(ref, {
-      owner,
-      acquiredAt: admin.firestore.Timestamp.fromMillis(now),
-      expiresAt: admin.firestore.Timestamp.fromMillis(expiresAtMs),
-      expiresAtMs,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    }, { merge: true });
-    return true;
-  });
-  if (!acquired) return { skipped: true, reason: 'already-running' };
+async function runScheduledSync(db, admin) {
+  if (syncRunning) return { skipped: true, reason: 'already-running' };
+  syncRunning = true;
   try {
-    return await fn();
+    return await syncOrders({ db, admin, limit: 100 });
   } finally {
-    try {
-      await db.runTransaction(async tx => {
-        const snap = await tx.get(ref);
-        if (snap.exists && snap.data()?.owner === owner) tx.delete(ref);
-      });
-    } catch (error) {
-      console.error(`release ${name} lock:`, error?.message || error);
-    }
+    syncRunning = false;
   }
 }
 
-async function runScheduledSync(db, admin) {
-  return withFirestoreLock(db, admin, 'ordersSync', () => syncOrders({ db, admin, limit: 100 }));
-}
-
-async function runScheduledServiceSync(db, admin) {
-  return withFirestoreLock(db, admin, 'servicesSync', async () => {
+async function runScheduledServiceSync(db) {
+  if (serviceSyncRunning) return { skipped: true, reason: 'already-running' };
+  serviceSyncRunning = true;
+  try {
     const services = await syncServices(db, true);
     return { serviceCount: services.length };
-  });
+  } finally {
+    serviceSyncRunning = false;
+  }
 }
 
 router.get('/sync-orders', (req, res, next) => req.app.locals.verifyToken(req, res, next), async (req, res) => {
@@ -67,27 +41,27 @@ router.get('/sync-orders', (req, res, next) => req.app.locals.verifyToken(req, r
     res.json({ ok: true, ...result });
   } catch (error) {
     console.error('user sync orders:', error);
-    res.status(502).json({ ok: false, error: 'Không đồng bộ được đơn hàng', detail: error?.message || 'Provider/Firestore error' });
+    res.status(500).json({ error: 'Không đồng bộ được đơn hàng' });
   }
 });
 
 router.post('/sync-orders', cronGuard, async (req, res) => {
   try {
-    const result = await runScheduledSync(req.app.locals.db, req.app.locals.admin);
+    const result = await syncOrders({ db: req.app.locals.db, admin: req.app.locals.admin, limit: req.query.limit || 100 });
     res.json({ ok: true, ...result });
   } catch (error) {
     console.error('cron sync orders:', error);
-    res.status(502).json({ ok: false, error: 'Không đồng bộ được đơn hàng', detail: error?.message || 'Provider/Firestore error' });
+    res.status(500).json({ error: 'Không đồng bộ được đơn hàng' });
   }
 });
 
 router.post('/sync-services', cronGuard, async (req, res) => {
   try {
-    const result = await runScheduledServiceSync(req.app.locals.db, req.app.locals.admin);
-    res.json({ ok: true, ...result });
+    const services = await syncServices(req.app.locals.db, true);
+    res.json({ ok: true, serviceCount: services.length });
   } catch (error) {
     console.error('cron sync services:', error);
-    res.status(502).json({ ok: false, error: 'Không đồng bộ được dịch vụ Provider', detail: error?.message || 'Provider/Firestore error' });
+    res.status(502).json({ error: 'Không đồng bộ được dịch vụ Provider' });
   }
 });
 

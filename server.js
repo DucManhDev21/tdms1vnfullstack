@@ -15,11 +15,9 @@ const { getPricingOverrides, parseMarkup, roundMoney } = require('./pricing');
 const depositRouter = require('./deposit');
 const { startAdminBot } = require('./admin-bot');
 const { ensureOwnerAdmin, isAdmin, listAdmins, addAdmin, deleteAdmin } = require('./admins');
-const { providerConfig, providerServices } = require('./provider');
 
 const app = express();
 const PORT = Number(process.env.PORT || 8080);
-const APP_VERSION = String(process.env.APP_VERSION || '12.1.0').trim() || '12.1.0';
 
 if (!admin.apps.length) {
   const rawServiceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
@@ -161,18 +159,12 @@ function jsonSafe(res,payload,status=200){
 
 app.get('/health', (req, res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok: true, service: 'TDMS1VN', version: APP_VERSION, time: new Date().toISOString() });
+  res.json({ ok: true, service: 'TDMS1VN', version: '11.1.0', time: new Date().toISOString() });
 });
 
 app.get('/api/health', (req,res) => {
   res.set('Cache-Control','no-store');
-  res.set('X-TDMS-Version', APP_VERSION);
-  res.json({ ok:true, service:'TDMS1VN API', version:APP_VERSION, providerConfigured:Boolean(String(process.env.PROVIDER_API_URL||'').trim()&&String(process.env.PROVIDER_API_KEY||'').trim()), time:new Date().toISOString() });
-});
-
-app.get('/api/version', (req,res) => {
-  res.set('Cache-Control','no-store');
-  res.json({ ok:true, service:'TDMS1VN API', version:APP_VERSION, providerApiUrl:String(process.env.PROVIDER_API_URL||'').trim()||null, providerConfigured:Boolean(String(process.env.PROVIDER_API_URL||'').trim()&&String(process.env.PROVIDER_API_KEY||'').trim()), time:new Date().toISOString() });
+  res.json({ ok:true, service:'TDMS1VN API', version:'11.1.0', time:new Date().toISOString() });
 });
 
 app.get('/api/ping', (req,res) => res.json({ ok:true, time:new Date().toISOString() }));
@@ -202,9 +194,9 @@ app.get('/api', (req, res) => {
   res.json({
     ok: true,
     service: 'TDMS1VN API',
-    version: APP_VERSION,
+    version: '11.1.0',
     frontend: 'https://tdms1vip.vercel.app',
-    endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me', '/api/admin/session','/api/admin/dashboard','/api/admin/diagnostics','/api/admin/provider/test','/api/admin/orders/sync']
+    endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me', '/api/admin/session','/api/admin/dashboard','/api/admin/diagnostics','/api/admin/orders/sync']
   });
 });
 
@@ -319,7 +311,7 @@ app.get('/api/admin/system', verifyToken, requireAdmin, async (req, res) => {
     res.set('Cache-Control','no-store');
     res.json({
       ok:true,
-      api:{version:APP_VERSION, node:process.version, environment:process.env.NODE_ENV || 'production'},
+      api:{version:'11.1.0', node:process.version, environment:process.env.NODE_ENV || 'production'},
       firebase:{projectId:process.env.FIREBASE_PROJECT_ID || null, configured:Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_JSON)},
       provider:{configured:Boolean(process.env.PROVIDER_API_URL && process.env.PROVIDER_API_KEY), baseUrl:process.env.PROVIDER_API_URL || null},
       telegram:{configured:Boolean(String(process.env.ADMIN_TELEGRAM_BOT_TOKEN || '').trim()), chatConfigured:Boolean(String(process.env.ADMIN_TELEGRAM_CHAT_ID || '').trim())},
@@ -333,7 +325,7 @@ app.get('/api/admin/system', verifyToken, requireAdmin, async (req, res) => {
     });
   } catch (error) {
     console.error('admin system:', error);
-    return jsonSafe(res,{ok:true,degraded:true,error:'Không thể tải đầy đủ thông tin hệ thống.',warnings:[errorInfo(error).message]},200);
+    res.status(500).json({ ok:false, error:'Không thể tải thông tin hệ thống.' });
   }
 });
 
@@ -438,38 +430,8 @@ app.get('/api/admin/dashboard', verifyToken, requireAdmin, async (req,res)=>{
   safe.degraded=Boolean(safe.degraded||safe.warnings.length);safe.generatedAt=new Date().toISOString();res.set('Cache-Control','no-store');return jsonSafe(res,safe,200);
 });
 
-app.get('/api/admin/provider/test', verifyToken, requireAdmin, async (req, res) => {
-  try {
-    const cfg = providerConfig();
-    const data = await providerServices();
-    if (!Array.isArray(data)) throw new Error('Provider không trả về mảng services');
-    return jsonSafe(res, { ok: true, provider: true, endpoint: cfg.url, serviceCount: data.length }, 200);
-  } catch (error) {
-    console.error('provider test GET:', errorInfo(error));
-    return jsonSafe(res, {
-      ok: false,
-      provider: false,
-      code: error?.providerCode || error?.code || 'PROVIDER_ERROR',
-      httpStatus: error?.providerStatus || null,
-      error: error?.message || 'Provider test failed'
-    }, 200);
-  }
-});
-
-app.post('/api/admin/provider/test', verifyToken, requireAdmin, async (req, res) => {
-  try {
-    const cfg = providerConfig();
-    const data = await providerServices();
-    if (!Array.isArray(data)) throw new Error('Provider không trả về mảng services');
-    return jsonSafe(res, { ok:true, provider:true, endpoint:cfg.url, serviceCount:data.length }, 200);
-  } catch (error) {
-    console.error('provider test:', errorInfo(error));
-    return jsonSafe(res, { ok:false, provider:false, code:error?.providerCode || error?.code || 'PROVIDER_ERROR', httpStatus:error?.providerStatus || null, error:error?.message || 'Provider test failed' }, 200);
-  }
-});
-
 app.get('/api/admin/diagnostics', verifyToken, requireAdmin, async (req,res)=>{
-  const r={ok:true,version:APP_VERSION,node:process.version,environment:process.env.NODE_ENV||'production',checks:{},warnings:[]};
+  const r={ok:true,version:'11.1.0',node:process.version,environment:process.env.NODE_ENV||'production',checks:{},warnings:[]};
   r.checks.firebaseAuth={configured:Boolean(admin.apps.length)};r.checks.adminEmail={configured:Boolean(ADMIN_EMAIL),value:ADMIN_EMAIL||null};
   r.checks.provider={configured:Boolean(String(process.env.PROVIDER_API_URL||'').trim()&&String(process.env.PROVIDER_API_KEY||'').trim()),baseUrl:String(process.env.PROVIDER_API_URL||'').trim()||null};
   r.checks.telegram={configured:Boolean(String(process.env.ADMIN_TELEGRAM_BOT_TOKEN||'').trim()),chatConfigured:Boolean(String(process.env.ADMIN_TELEGRAM_CHAT_ID||'').trim())};
@@ -725,17 +687,6 @@ app.use((error, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-app.use((req, res) => {
-  if (req.path.startsWith('/api/')) return res.status(404).json({ ok:false, error:'API endpoint không tồn tại', path:req.path });
-  return res.status(404).json({ ok:false, error:'Not found' });
-});
-
-app.use((error, req, res, next) => {
-  console.error('unhandled express error:', errorInfo(error));
-  if (res.headersSent) return next(error);
-  return res.status(500).json({ ok:false, error:'Internal server error' });
-});
-
 if (require.main === module) {
   app.listen(PORT, async () => {
     console.log(`TDMS1VN API server listening on ${PORT}`);
@@ -755,11 +706,11 @@ if (require.main === module) {
     const serviceInterval = Number(process.env.SERVICE_AUTO_SYNC_INTERVAL_MS || 900000);
     if (Number.isFinite(serviceInterval) && serviceInterval >= 60000) {
       setInterval(() => {
-        cronModule.runScheduledServiceSync(db, admin).catch(error => console.error('scheduled service sync:', error));
+        cronModule.runScheduledServiceSync(db).catch(error => console.error('scheduled service sync:', error));
       }, serviceInterval).unref();
     }
     setTimeout(() => {
-      cronModule.runScheduledServiceSync(db, admin).catch(error => console.error('initial service sync:', error));
+      cronModule.runScheduledServiceSync(db).catch(error => console.error('initial service sync:', error));
     }, 5000).unref();
   });
 }

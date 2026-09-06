@@ -12,20 +12,7 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return signedIn()
-        && (
-          request.auth.token.admin == true
-          || (
-            request.auth.token.email != null
-            && exists(/databases/$(database)/documents/admins/$(request.auth.token.email))
-            && get(/databases/$(database)/documents/admins/$(request.auth.token.email)).data.active == true
-          )
-        );
-    }
-
-    match /admins/{email} {
-      allow read: if isAdmin();
-      allow create, update, delete: if false;
+      return false;
     }
 
     match /users/{uid} {
