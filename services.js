@@ -181,7 +181,11 @@ router.get('/', async (req, res) => {
       error: 'Không lấy được danh sách dịch vụ từ Provider',
       code: error?.providerCode || error?.code || 'PROVIDER_ERROR',
       httpStatus: error?.providerStatus || null,
-      message: String(error?.message || 'Provider unavailable').slice(0, 300)
+      message: String(error?.message || 'Provider unavailable').slice(0, 300),
+      providerConfigured: Boolean(
+        String(process.env.PROVIDER_API_URL || '').trim() &&
+        String(process.env.PROVIDER_API_KEY || '').trim()
+      )
     });
   }
 });

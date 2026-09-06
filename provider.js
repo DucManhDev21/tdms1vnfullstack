@@ -11,9 +11,11 @@ function providerConfig() {
   if (!key) throw new Error('PROVIDER_API_KEY chưa được cấu hình');
 
   let url = rawUrl.replace(/\s+/g, '').replace(/\/+$/, '');
-  // This provider exposes the standard SMM API under /api/v2.
-  if (/\/api\/v2$/i.test(url)) url += '/';
-  else if (!/\/api\/v2(?:\/|$)/i.test(url)) url += '/api/v2/';
+  // The provider documents the endpoint as exactly /api/v2.
+  // Do not append a trailing slash.
+  if (!/\/api\/v2$/i.test(url)) {
+    url = url.replace(/\/+$/, '') + '/api/v2';
+  }
 
   return { url, key, timeout: Math.min(Math.max(Number(process.env.PROVIDER_TIMEOUT_MS || 20000), 3000), 60000) };
 }
@@ -35,17 +37,22 @@ function providerError(error, action = 'Provider API') {
 async function providerRequest(params) {
   const cfg = providerConfig();
   const client = axios.create({
-    baseURL: cfg.url,
     timeout: cfg.timeout,
     validateStatus: () => true,
-    headers: { 'User-Agent': 'TDMS1VN-ProviderClient/12.1', Accept: 'application/json' }
+    headers: {
+      'User-Agent': 'TDMS1VN-ProviderClient/12.1',
+      Accept: 'application/json'
+    }
   });
   let lastError = null;
   for (let attempt = 0; attempt <= PROVIDER_RETRIES; attempt += 1) {
     try {
       const body = new URLSearchParams({ key: cfg.key, ...params }).toString();
-      const response = await client.post('', body, {
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+      const response = await client.post(cfg.url, body, {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json'
+        }
       });
       if (response.status < 200 || response.status >= 300) {
         const err = Object.assign(new Error(`HTTP ${response.status}`), { response });
@@ -54,7 +61,25 @@ async function providerRequest(params) {
       } else if (response.data && typeof response.data === 'object' && !Array.isArray(response.data) && response.data.error) {
         throw Object.assign(new Error(String(response.data.error)), { response });
       } else {
-        return response.data;
+        let data = response.data;
+        if (typeof data === 'string') {
+          const text = data.trim();
+          if (!text) {
+            throw Object.assign(new Error('Provider trả về response rỗng'), { response });
+          }
+          try {
+            data = JSON.parse(text);
+          } catch {
+            throw Object.assign(
+              new Error(`Provider trả về dữ liệu không phải JSON: ${text.slice(0, 300)}`),
+              { response }
+            );
+          }
+        }
+        if (data && typeof data === 'object' && !Array.isArray(data) && data.error) {
+          throw Object.assign(new Error(String(data.error)), { response: { ...response, data } });
+        }
+        return data;
       }
     } catch (error) {
       lastError = error;

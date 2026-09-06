@@ -438,6 +438,24 @@ app.get('/api/admin/dashboard', verifyToken, requireAdmin, async (req,res)=>{
   safe.degraded=Boolean(safe.degraded||safe.warnings.length);safe.generatedAt=new Date().toISOString();res.set('Cache-Control','no-store');return jsonSafe(res,safe,200);
 });
 
+app.get('/api/admin/provider/test', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const cfg = providerConfig();
+    const data = await providerServices();
+    if (!Array.isArray(data)) throw new Error('Provider không trả về mảng services');
+    return jsonSafe(res, { ok: true, provider: true, endpoint: cfg.url, serviceCount: data.length }, 200);
+  } catch (error) {
+    console.error('provider test GET:', errorInfo(error));
+    return jsonSafe(res, {
+      ok: false,
+      provider: false,
+      code: error?.providerCode || error?.code || 'PROVIDER_ERROR',
+      httpStatus: error?.providerStatus || null,
+      error: error?.message || 'Provider test failed'
+    }, 200);
+  }
+});
+
 app.post('/api/admin/provider/test', verifyToken, requireAdmin, async (req, res) => {
   try {
     const cfg = providerConfig();
