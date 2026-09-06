@@ -159,10 +159,30 @@ router.get('/', async (req, res) => {
   try {
     const services = await getServices(req.query.refresh === '1', req.app.locals.db);
     res.set('Cache-Control', 'no-store');
-    res.json({ services, cachedAt, count: services.length, defaultMarkupPercent: defaultMarkupPercent() });
+    res.json({ services, cachedAt, count: services.length, defaultMarkupPercent: defaultMarkupPercent(), degraded: false });
   } catch (error) {
-    console.error('services:', error.message);
-    res.status(502).json({ error: 'Không lấy được danh sách dịch vụ từ Provider' });
+    const fallback = await loadCatalogFallback(req.app.locals.db);
+    if (fallback.length) {
+      cachedServices = fallback;
+      cachedAt = Date.now();
+      console.error('services: Provider unavailable; returning Firestore catalog fallback:', error.message);
+      res.set('Cache-Control', 'no-store');
+      return res.json({
+        services: fallback,
+        cachedAt,
+        count: fallback.length,
+        defaultMarkupPercent: defaultMarkupPercent(),
+        degraded: true,
+        provider: { available: false, code: error?.providerCode || error?.code || 'PROVIDER_ERROR', httpStatus: error?.providerStatus || null }
+      });
+    }
+    console.error('services:', error);
+    res.status(502).json({
+      error: 'Không lấy được danh sách dịch vụ từ Provider',
+      code: error?.providerCode || error?.code || 'PROVIDER_ERROR',
+      httpStatus: error?.providerStatus || null,
+      message: String(error?.message || 'Provider unavailable').slice(0, 300)
+    });
   }
 });
 

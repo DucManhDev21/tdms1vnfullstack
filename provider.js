@@ -2,6 +2,8 @@
 
 const axios = require('axios');
 
+const PROVIDER_RETRIES = Math.min(Math.max(Number(process.env.PROVIDER_RETRIES || 2), 0), 3);
+
 function providerConfig() {
   const rawUrl = String(process.env.PROVIDER_API_URL || '').trim();
   const key = String(process.env.PROVIDER_API_KEY || '').trim();
@@ -32,21 +34,37 @@ function providerError(error, action = 'Provider API') {
 
 async function providerRequest(params) {
   const cfg = providerConfig();
-  const client = axios.create({ baseURL: cfg.url, timeout: cfg.timeout, validateStatus: () => true });
-  try {
-    const response = await client.post('', new URLSearchParams({ key: cfg.key, ...params }).toString(), {
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' }
-    });
-    if (response.status < 200 || response.status >= 300) {
-      throw Object.assign(new Error(`HTTP ${response.status}`), { response });
+  const client = axios.create({
+    baseURL: cfg.url,
+    timeout: cfg.timeout,
+    validateStatus: () => true,
+    headers: { 'User-Agent': 'TDMS1VN-ProviderClient/12.1', Accept: 'application/json' }
+  });
+  let lastError = null;
+  for (let attempt = 0; attempt <= PROVIDER_RETRIES; attempt += 1) {
+    try {
+      const body = new URLSearchParams({ key: cfg.key, ...params }).toString();
+      const response = await client.post('', body, {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+      });
+      if (response.status < 200 || response.status >= 300) {
+        const err = Object.assign(new Error(`HTTP ${response.status}`), { response });
+        if (response.status >= 400 && response.status < 500) throw err;
+        lastError = err;
+      } else if (response.data && typeof response.data === 'object' && !Array.isArray(response.data) && response.data.error) {
+        throw Object.assign(new Error(String(response.data.error)), { response });
+      } else {
+        return response.data;
+      }
+    } catch (error) {
+      lastError = error;
+      const status = error?.response?.status;
+      const retryable = !status || status === 408 || status === 425 || status === 429 || status >= 500;
+      if (!retryable || attempt >= PROVIDER_RETRIES) break;
     }
-    if (response.data && typeof response.data === 'object' && !Array.isArray(response.data) && response.data.error) {
-      throw Object.assign(new Error(String(response.data.error)), { response });
-    }
-    return response.data;
-  } catch (error) {
-    throw providerError(error, `Provider action ${params.action || ''}`.trim());
+    await new Promise(resolve => setTimeout(resolve, 350 * (attempt + 1)));
   }
+  throw providerError(lastError, `Provider action ${params.action || ''}`.trim());
 }
 
 async function providerServices() {

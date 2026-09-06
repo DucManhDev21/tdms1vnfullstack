@@ -19,6 +19,7 @@ const { providerConfig, providerServices } = require('./provider');
 
 const app = express();
 const PORT = Number(process.env.PORT || 8080);
+const APP_VERSION = String(process.env.APP_VERSION || '12.1.0').trim() || '12.1.0';
 
 if (!admin.apps.length) {
   const rawServiceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
@@ -160,12 +161,18 @@ function jsonSafe(res,payload,status=200){
 
 app.get('/health', (req, res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok: true, service: 'TDMS1VN', version: '11.1.0', time: new Date().toISOString() });
+  res.json({ ok: true, service: 'TDMS1VN', version: APP_VERSION, time: new Date().toISOString() });
 });
 
 app.get('/api/health', (req,res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok:true, service:'TDMS1VN API', version:'11.1.0', time:new Date().toISOString() });
+  res.set('X-TDMS-Version', APP_VERSION);
+  res.json({ ok:true, service:'TDMS1VN API', version:APP_VERSION, providerConfigured:Boolean(String(process.env.PROVIDER_API_URL||'').trim()&&String(process.env.PROVIDER_API_KEY||'').trim()), time:new Date().toISOString() });
+});
+
+app.get('/api/version', (req,res) => {
+  res.set('Cache-Control','no-store');
+  res.json({ ok:true, service:'TDMS1VN API', version:APP_VERSION, providerApiUrl:String(process.env.PROVIDER_API_URL||'').trim()||null, providerConfigured:Boolean(String(process.env.PROVIDER_API_URL||'').trim()&&String(process.env.PROVIDER_API_KEY||'').trim()), time:new Date().toISOString() });
 });
 
 app.get('/api/ping', (req,res) => res.json({ ok:true, time:new Date().toISOString() }));
@@ -195,7 +202,7 @@ app.get('/api', (req, res) => {
   res.json({
     ok: true,
     service: 'TDMS1VN API',
-    version: '11.1.0',
+    version: APP_VERSION,
     frontend: 'https://tdms1vip.vercel.app',
     endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me', '/api/admin/session','/api/admin/dashboard','/api/admin/diagnostics','/api/admin/provider/test','/api/admin/orders/sync']
   });
@@ -312,7 +319,7 @@ app.get('/api/admin/system', verifyToken, requireAdmin, async (req, res) => {
     res.set('Cache-Control','no-store');
     res.json({
       ok:true,
-      api:{version:'11.1.0', node:process.version, environment:process.env.NODE_ENV || 'production'},
+      api:{version:APP_VERSION, node:process.version, environment:process.env.NODE_ENV || 'production'},
       firebase:{projectId:process.env.FIREBASE_PROJECT_ID || null, configured:Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_JSON)},
       provider:{configured:Boolean(process.env.PROVIDER_API_URL && process.env.PROVIDER_API_KEY), baseUrl:process.env.PROVIDER_API_URL || null},
       telegram:{configured:Boolean(String(process.env.ADMIN_TELEGRAM_BOT_TOKEN || '').trim()), chatConfigured:Boolean(String(process.env.ADMIN_TELEGRAM_CHAT_ID || '').trim())},
@@ -444,7 +451,7 @@ app.post('/api/admin/provider/test', verifyToken, requireAdmin, async (req, res)
 });
 
 app.get('/api/admin/diagnostics', verifyToken, requireAdmin, async (req,res)=>{
-  const r={ok:true,version:'11.1.0',node:process.version,environment:process.env.NODE_ENV||'production',checks:{},warnings:[]};
+  const r={ok:true,version:APP_VERSION,node:process.version,environment:process.env.NODE_ENV||'production',checks:{},warnings:[]};
   r.checks.firebaseAuth={configured:Boolean(admin.apps.length)};r.checks.adminEmail={configured:Boolean(ADMIN_EMAIL),value:ADMIN_EMAIL||null};
   r.checks.provider={configured:Boolean(String(process.env.PROVIDER_API_URL||'').trim()&&String(process.env.PROVIDER_API_KEY||'').trim()),baseUrl:String(process.env.PROVIDER_API_URL||'').trim()||null};
   r.checks.telegram={configured:Boolean(String(process.env.ADMIN_TELEGRAM_BOT_TOKEN||'').trim()),chatConfigured:Boolean(String(process.env.ADMIN_TELEGRAM_CHAT_ID||'').trim())};
