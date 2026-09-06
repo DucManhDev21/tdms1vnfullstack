@@ -1,5 +1,5 @@
 const express = require('express');
-const axios = require('axios');
+const { providerServices } = require('./provider');
 const router = express.Router();
 const { applyPricing, defaultMarkupPercent, getPricingOverrides, roundMoney } = require('./pricing');
 
@@ -7,13 +7,6 @@ const CACHE_MS = Number(process.env.SERVICE_CACHE_MS || 5 * 60 * 1000);
 let cachedServices = null;
 let cachedAt = 0;
 let refreshPromise = null;
-
-function providerClient() {
-  const baseURL = String(process.env.PROVIDER_API_URL || '').trim();
-  const key = String(process.env.PROVIDER_API_KEY || '').trim();
-  if (!baseURL || !key) throw new Error('Provider API is not configured');
-  return axios.create({ baseURL, timeout: Number(process.env.PROVIDER_TIMEOUT_MS || 20000) });
-}
 
 function detectPlatform(name, category, raw) {
   const text = `${name || ''} ${category || ''} ${raw?.platform || ''}`.toLowerCase();
@@ -78,15 +71,9 @@ function normalizeService(row) {
 }
 
 async function fetchProviderServices() {
-  const response = await providerClient().post('', new URLSearchParams({
-    key: process.env.PROVIDER_API_KEY,
-    action: 'services'
-  }).toString(), {
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-  });
-
-  if (!Array.isArray(response.data)) throw new Error('Provider services response is not an array');
-  const normalized = response.data.map(normalizeService).filter(Boolean);
+  const data = await providerServices();
+  if (!Array.isArray(data)) throw new Error('Provider services response is not an array');
+  const normalized = data.map(normalizeService).filter(Boolean);
   if (!normalized.length) throw new Error('Provider returned no usable services');
   return normalized;
 }
@@ -121,8 +108,15 @@ async function getServices(forceRefresh = false, db = null) {
   refreshPromise = (async () => {
     try {
       const freshBase = await fetchProviderServices();
-      const overrides = await getPricingOverrides(db);
-      const fresh = freshBase.map(service => applyPricing(service, overrides.get(String(service.service)))).filter(service => service.enabled);
+      let overrides = new Map();
+      try {
+        overrides = await getPricingOverrides(db);
+      } catch (error) {
+        console.error('pricing overrides unavailable; using defaults:', error?.message || error);
+      }
+      const fresh = freshBase
+        .map(service => applyPricing(service, overrides.get(String(service.service))))
+        .filter(service => service.enabled);
       cachedServices = fresh;
       cachedAt = Date.now();
       if (db) await persistCatalog(db, fresh);
@@ -141,18 +135,65 @@ async function getServices(forceRefresh = false, db = null) {
   return refreshPromise;
 }
 
+async function loadCatalogFallback(db) {
+  if (!db) return [];
+  try {
+    const snap = await db.collection('service_catalog').limit(2000).get();
+    const rows = snap.docs.map(d => d.data() || {}).filter(x => x.service != null);
+    return rows;
+  } catch (error) {
+    console.error('service catalog fallback:', error?.code || 'unknown', error?.message || error);
+    return [];
+  }
+}
+
 async function syncServices(db, forceRefresh = true) {
-  return getServices(forceRefresh, db);
+  try {
+    return await getServices(forceRefresh, db);
+  } catch (error) {
+    const fallback = await loadCatalogFallback(db);
+    if (fallback.length) {
+      cachedServices = fallback;
+      cachedAt = Date.now();
+      console.error('Provider sync failed; using Firestore catalog fallback:', error?.message || error);
+      return fallback;
+    }
+    throw error;
+  }
 }
 
 router.get('/', async (req, res) => {
   try {
     const services = await getServices(req.query.refresh === '1', req.app.locals.db);
     res.set('Cache-Control', 'no-store');
-    res.json({ services, cachedAt, count: services.length, defaultMarkupPercent: defaultMarkupPercent() });
+    res.json({ services, cachedAt, count: services.length, defaultMarkupPercent: defaultMarkupPercent(), degraded: false });
   } catch (error) {
-    console.error('services:', error.message);
-    res.status(502).json({ error: 'Không lấy được danh sách dịch vụ từ Provider' });
+    const fallback = await loadCatalogFallback(req.app.locals.db);
+    if (fallback.length) {
+      cachedServices = fallback;
+      cachedAt = Date.now();
+      console.error('services: Provider unavailable; returning Firestore catalog fallback:', error.message);
+      res.set('Cache-Control', 'no-store');
+      return res.json({
+        services: fallback,
+        cachedAt,
+        count: fallback.length,
+        defaultMarkupPercent: defaultMarkupPercent(),
+        degraded: true,
+        provider: { available: false, code: error?.providerCode || error?.code || 'PROVIDER_ERROR', httpStatus: error?.providerStatus || null }
+      });
+    }
+    console.error('services:', error);
+    res.status(502).json({
+      error: 'Không lấy được danh sách dịch vụ từ Provider',
+      code: error?.providerCode || error?.code || 'PROVIDER_ERROR',
+      httpStatus: error?.providerStatus || null,
+      message: String(error?.message || 'Provider unavailable').slice(0, 300),
+      providerConfigured: Boolean(
+        String(process.env.PROVIDER_API_URL || '').trim() &&
+        String(process.env.PROVIDER_API_KEY || '').trim()
+      )
+    });
   }
 });
 
@@ -173,4 +214,5 @@ router.get('/:serviceId', async (req, res) => {
 module.exports = router;
 module.exports.getServices = getServices;
 module.exports.syncServices = syncServices;
+module.exports.loadCatalogFallback = loadCatalogFallback;
 module.exports.normalizeService = normalizeService;

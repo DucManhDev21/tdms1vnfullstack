@@ -15,9 +15,11 @@ const { getPricingOverrides, parseMarkup, roundMoney } = require('./pricing');
 const depositRouter = require('./deposit');
 const { startAdminBot } = require('./admin-bot');
 const { ensureOwnerAdmin, isAdmin, listAdmins, addAdmin, deleteAdmin } = require('./admins');
+const { providerConfig, providerServices } = require('./provider');
 
 const app = express();
 const PORT = Number(process.env.PORT || 8080);
+const APP_VERSION = String(process.env.APP_VERSION || '12.2.0').trim() || '12.2.0';
 
 if (!admin.apps.length) {
   const rawServiceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
@@ -136,14 +138,41 @@ async function verifyToken(req, res, next) {
 
 app.locals.verifyToken = verifyToken;
 
+function errorInfo(error) {
+  return { code: error?.code || error?.name || 'UNKNOWN_ERROR', message: String(error?.message || 'Unknown error') };
+}
+function serializeDeep(value, seen = new WeakSet()) {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'bigint') return Number(value);
+  if (value instanceof Date || (value && typeof value.toDate === 'function')) {
+    try { return value instanceof Date ? value.toISOString() : value.toDate().toISOString(); } catch { return String(value); }
+  }
+  if (typeof value !== 'object') return value;
+  if (seen.has(value)) return '[Circular]';
+  seen.add(value);
+  if (Array.isArray(value)) return value.map(v => serializeDeep(v, seen));
+  const out={}; for (const [k,v] of Object.entries(value)) out[k]=serializeDeep(v,seen); return out;
+}
+function jsonSafe(res,payload,status=200){
+  try{return res.status(status).json(serializeDeep(payload));}
+  catch(error){console.error('json serialization failure:',errorInfo(error));return res.status(200).json({ok:true,degraded:true,code:'JSON_SERIALIZATION_FALLBACK',error:'Không thể tuần tự hóa một phần dữ liệu.'});}
+}
+
+
 app.get('/health', (req, res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok: true, service: 'TDMS1VN', version: '10.3.0', time: new Date().toISOString() });
+  res.json({ ok: true, service: 'TDMS1VN', version: APP_VERSION, time: new Date().toISOString() });
 });
 
 app.get('/api/health', (req,res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok:true, service:'TDMS1VN API', version:'10.3.0', time:new Date().toISOString() });
+  res.set('X-TDMS-Version', APP_VERSION);
+  res.json({ ok:true, service:'TDMS1VN API', version:APP_VERSION, providerConfigured:Boolean(String(process.env.PROVIDER_API_URL||'').trim()&&String(process.env.PROVIDER_API_KEY||'').trim()), time:new Date().toISOString() });
+});
+
+app.get('/api/version', (req,res) => {
+  res.set('Cache-Control','no-store');
+  res.json({ ok:true, service:'TDMS1VN API', version:APP_VERSION, providerApiUrl:String(process.env.PROVIDER_API_URL||'').trim()||null, providerConfigured:Boolean(String(process.env.PROVIDER_API_URL||'').trim()&&String(process.env.PROVIDER_API_KEY||'').trim()), time:new Date().toISOString() });
 });
 
 app.get('/api/ping', (req,res) => res.json({ ok:true, time:new Date().toISOString() }));
@@ -173,9 +202,9 @@ app.get('/api', (req, res) => {
   res.json({
     ok: true,
     service: 'TDMS1VN API',
-    version: '10.3.0',
+    version: APP_VERSION,
     frontend: 'https://tdms1vip.vercel.app',
-    endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me', '/api/admin/session']
+    endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me', '/api/admin/session','/api/admin/dashboard','/api/admin/diagnostics','/api/admin/provider/test','/api/admin/orders/sync']
   });
 });
 
@@ -189,26 +218,33 @@ app.get('/api/admin/session', verifyToken, async (req, res) => {
     if (!email) return res.status(403).json({ ok:false, error:'Tài khoản chưa có email.' });
     if (userRecord.disabled) return res.status(403).json({ ok:false, error:'Tài khoản đã bị vô hiệu hóa.' });
     if (!userRecord.emailVerified) return res.status(403).json({ ok:false, error:'Gmail chưa được xác minh trên Firebase.' });
-    const allowed = await isAdmin(db, email);
-    if (!allowed) return res.status(403).json({ ok:false, error:'Tài khoản này không nằm trong danh sách Admin.' });
+    try {
+      const allowed = await isAdmin(db, email);
+      if (!allowed) return res.status(403).json({ ok:false, error:'Tài khoản này không nằm trong danh sách Admin.' });
+    } catch (dependencyError) {
+      console.error('admin session dependency:', dependencyError?.code || 'unknown', dependencyError?.message || dependencyError);
+      if (email !== ADMIN_EMAIL) return res.status(503).json({ ok:false, error:'Dịch vụ phân quyền Admin tạm thời không khả dụng.', code:'ADMIN_AUTH_DEPENDENCY_UNAVAILABLE' });
+    }
     res.set('Cache-Control','no-store');
-    res.json({ ok:true, admin:true, uid:userRecord.uid, email:userRecord.email });
+    res.json({ ok:true, admin:true, uid:userRecord.uid, email:userRecord.email, degraded: false });
   } catch (error) {
     console.error('admin session:', error);
-    res.status(403).json({ ok:false, error:'Không thể xác thực phiên Admin.' });
+    res.status(503).json({ ok:false, error:'Máy chủ Admin tạm thời không thể xác thực phiên.', code:error?.code || 'ADMIN_SESSION_UNAVAILABLE' });
   }
 });
 
 async function requireAdmin(req, res, next) {
+  const email = String(req.user?.email || '').trim().toLowerCase();
+  if (!email) return res.status(403).json({ ok:false, error:'Tài khoản không có email.' });
   try {
-    const email = String(req.user?.email || '').trim().toLowerCase();
-    if (!email || !(await isAdmin(db, email))) {
-      return res.status(403).json({ ok:false, error:'Bạn không có quyền Admin.' });
-    }
-    return next();
+    if (await isAdmin(db, email)) return next();
+    return res.status(403).json({ ok:false, error:'Bạn không có quyền Admin.' });
   } catch (error) {
-    console.error('requireAdmin:', error);
-    return res.status(500).json({ ok:false, error:'Không thể kiểm tra quyền Admin.' });
+    console.error('requireAdmin:', error?.code || 'unknown', error?.message || error);
+    // The permanent owner can still enter the control center if Firestore is temporarily unavailable.
+    // Other admins cannot be safely authorized without the admins collection.
+    if (email === ADMIN_EMAIL) return next();
+    return res.status(503).json({ ok:false, error:'Dịch vụ phân quyền Admin tạm thời không khả dụng.', code:'ADMIN_AUTH_DEPENDENCY_UNAVAILABLE' });
   }
 }
 
@@ -283,7 +319,7 @@ app.get('/api/admin/system', verifyToken, requireAdmin, async (req, res) => {
     res.set('Cache-Control','no-store');
     res.json({
       ok:true,
-      api:{version:'10.3.0', node:process.version, environment:process.env.NODE_ENV || 'production'},
+      api:{version:APP_VERSION, node:process.version, environment:process.env.NODE_ENV || 'production'},
       firebase:{projectId:process.env.FIREBASE_PROJECT_ID || null, configured:Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_JSON)},
       provider:{configured:Boolean(process.env.PROVIDER_API_URL && process.env.PROVIDER_API_KEY), baseUrl:process.env.PROVIDER_API_URL || null},
       telegram:{configured:Boolean(String(process.env.ADMIN_TELEGRAM_BOT_TOKEN || '').trim()), chatConfigured:Boolean(String(process.env.ADMIN_TELEGRAM_CHAT_ID || '').trim())},
@@ -297,7 +333,7 @@ app.get('/api/admin/system', verifyToken, requireAdmin, async (req, res) => {
     });
   } catch (error) {
     console.error('admin system:', error);
-    res.status(500).json({ ok:false, error:'Không thể tải thông tin hệ thống.' });
+    return jsonSafe(res,{ok:true,degraded:true,error:'Không thể tải đầy đủ thông tin hệ thống.',warnings:[errorInfo(error).message]},200);
   }
 });
 
@@ -306,7 +342,7 @@ app.get('/api/admin/users', verifyToken, requireAdmin, async (req,res) => {
     const limit = Math.min(Math.max(Number.parseInt(req.query.limit || '100',10) || 100,1),200);
     const snap = await db.collection('users').limit(limit).get();
     res.json({ ok:true, total:snap.size, items:snap.docs.map(serializeDoc) });
-  } catch(error) { console.error('admin users:',error); res.status(500).json({ok:false,error:'Không thể tải người dùng.'}); }
+  } catch(error) { console.error('admin users:',error); return jsonSafe(res,{ok:true,degraded:true,total:0,items:[],warnings:[errorInfo(error).message],code:errorInfo(error).code},200); }
 });
 
 app.get('/api/admin/orders', verifyToken, requireAdmin, async (req,res) => {
@@ -314,7 +350,7 @@ app.get('/api/admin/orders', verifyToken, requireAdmin, async (req,res) => {
     const limit = Math.min(Math.max(Number.parseInt(req.query.limit || '100',10) || 100,1),200);
     const snap = await db.collection('orders').limit(limit).get();
     res.json({ ok:true, total:snap.size, items:snap.docs.map(serializeDoc).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||''))) });
-  } catch(error) { console.error('admin orders:',error); res.status(500).json({ok:false,error:'Không thể tải đơn hàng.'}); }
+  } catch(error) { console.error('admin orders:',error); return jsonSafe(res,{ok:true,degraded:true,total:0,items:[],warnings:[errorInfo(error).message],code:errorInfo(error).code},200); }
 });
 
 app.get('/api/admin/deposits', verifyToken, requireAdmin, async (req,res) => {
@@ -323,7 +359,7 @@ app.get('/api/admin/deposits', verifyToken, requireAdmin, async (req,res) => {
     const snap = await db.collection('deposits').limit(limit).get();
     const items = snap.docs.map(serializeDoc).map(x=>{ delete x.code; return x; }).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
     res.json({ ok:true, total:items.length, items });
-  } catch(error) { console.error('admin deposits:',error); res.status(500).json({ok:false,error:'Không thể tải yêu cầu nạp tiền.'}); }
+  } catch(error) { console.error('admin deposits:',error); return jsonSafe(res,{ok:true,degraded:true,total:0,items:[],warnings:[errorInfo(error).message],code:errorInfo(error).code},200); }
 });
 
 app.get('/api/admin/popups', verifyToken, requireAdmin, async (req,res) => {
@@ -331,7 +367,7 @@ app.get('/api/admin/popups', verifyToken, requireAdmin, async (req,res) => {
     const snap = await db.collection('popups').limit(50).get();
     const items = snap.docs.map(serializeDoc).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
     res.json({ok:true,total:items.length,items});
-  } catch(error) { console.error('admin popups:',error); res.status(500).json({ok:false,error:'Không thể tải Popup.'}); }
+  } catch(error) { console.error('admin popups:',error); return jsonSafe(res,{ok:true,degraded:true,total:0,items:[],warnings:[errorInfo(error).message],code:errorInfo(error).code},200); }
 });
 
 app.post('/api/admin/popups', verifyToken, requireAdmin, async (req,res) => {
@@ -380,105 +416,74 @@ app.post('/api/admin/users/balance', verifyToken, requireAdmin, async (req,res) 
 
 
 async function adminDashboard(db) {
-  const warnings = [];
-
-  async function readCollection(name) {
-    try {
-      return await db.collection(name).get();
-    } catch (error) {
-      const code = error?.code || 'unknown';
-      const message = error?.message || String(error);
-      console.error(`dashboard read ${name}:`, code, message);
-      warnings.push(`${name}: ${code}`);
-      return null;
-    }
+  const warnings=[];
+  const result={users:0,orders:0,deposits:0,popups:0,completed:0,processing:0,canceled:0,orderRevenue:0,completedRevenue:0,approvedDepositCredit:0,warnings};
+  async function safeCount(name){
+    try{const c=db.collection(name);if(typeof c.count==='function'){try{const x=await c.count().get();return Number(x.data()?.count||0);}catch(error){warnings.push(`${name}:count:${errorInfo(error).code}`);}}const x=await c.limit(5000).get();if(x.size>=5000)warnings.push(`${name}:estimate_limited_5000`);return x.size;}
+    catch(error){warnings.push(`${name}:unavailable:${errorInfo(error).code}`);return 0;}
   }
-
-  const [usersSnap, ordersSnap, depositsSnap, popupsSnap] = await Promise.all([
-    readCollection('users'),
-    readCollection('orders'),
-    readCollection('deposits'),
-    readCollection('popups')
-  ]);
-
-  const orderDocs = ordersSnap?.docs || [];
-  const depositDocs = depositsSnap?.docs || [];
-
-  let completed = 0;
-  let processing = 0;
-  let canceled = 0;
-  let orderRevenue = 0;
-  let completedRevenue = 0;
-  let depositCredited = 0;
-
-  for (const doc of orderDocs) {
-    const data = doc.data() || {};
-    const status = String(data.status || '').trim().toLowerCase();
-    const value = Number(data.totalPrice || 0);
-    if (status === 'completed') completed += 1;
-    else if (['pending', 'in progress', 'partial', 'processing'].includes(status)) processing += 1;
-    else if (['canceled', 'cancelled'].includes(status)) canceled += 1;
-    if (Number.isFinite(value) && value >= 0) {
-      orderRevenue += value;
-      if (status === 'completed') completedRevenue += value;
-    }
-  }
-
-  for (const doc of depositDocs) {
-    const data = doc.data() || {};
-    const value = Number(data.creditedAmount || 0);
-    const status = String(data.status || '').trim().toLowerCase();
-    if (['đã duyệt', 'approved', 'completed'].includes(status) && Number.isFinite(value)) {
-      depositCredited += value;
-    }
-  }
-
-  return {
-    users: usersSnap?.size || 0,
-    orders: ordersSnap?.size || 0,
-    deposits: depositsSnap?.size || 0,
-    popups: popupsSnap?.size || 0,
-    completed,
-    processing,
-    canceled,
-    orderRevenue: roundMoney(orderRevenue),
-    completedRevenue: roundMoney(completedRevenue),
-    approvedDepositCredit: roundMoney(depositCredited),
-    warnings
-  };
+  async function safeDocs(name,limit=2000){try{const x=await db.collection(name).limit(limit).get();if(x.size>=limit)warnings.push(`${name}:snapshot_limit_${limit}`);return x;}catch(error){warnings.push(`${name}:unavailable:${errorInfo(error).code}`);return null;}}
+  const counts=await Promise.allSettled([safeCount('users'),safeCount('orders'),safeCount('deposits'),safeCount('popups')]);
+  result.users=counts[0].status==='fulfilled'?counts[0].value:0;result.orders=counts[1].status==='fulfilled'?counts[1].value:0;result.deposits=counts[2].status==='fulfilled'?counts[2].value:0;result.popups=counts[3].status==='fulfilled'?counts[3].value:0;
+  const [or,dr]=await Promise.allSettled([safeDocs('orders'),safeDocs('deposits')]);
+  for(const doc of (or.status==='fulfilled'?or.value:null)?.docs||[]){try{const d=doc.data()||{},st=String(d.status||'').trim().toLowerCase(),v=Number(d.totalPrice??d.price??0);if(st==='completed')result.completed++;else if(['pending','in progress','partial','processing'].includes(st))result.processing++;else if(['canceled','cancelled'].includes(st))result.canceled++;if(Number.isFinite(v)&&v>=0){result.orderRevenue+=v;if(st==='completed')result.completedRevenue+=v;}}catch{warnings.push(`order:${doc.id}:invalid`);}}
+  for(const doc of (dr.status==='fulfilled'?dr.value:null)?.docs||[]){try{const d=doc.data()||{},v=Number(d.creditedAmount??d.amount??0),st=String(d.status||'').trim().toLowerCase();if(['đã duyệt','approved','completed'].includes(st)&&Number.isFinite(v))result.approvedDepositCredit+=v;}catch{warnings.push(`deposit:${doc.id}:invalid`);}}
+  result.orderRevenue=roundMoney(result.orderRevenue);result.completedRevenue=roundMoney(result.completedRevenue);result.approvedDepositCredit=roundMoney(result.approvedDepositCredit);return result;
 }
 
-app.get('/api/admin/dashboard', verifyToken, requireAdmin, async (req, res) => {
+app.get('/api/admin/dashboard', verifyToken, requireAdmin, async (req,res)=>{
+  const safe={ok:true,degraded:false,users:0,orders:0,deposits:0,popups:0,completed:0,processing:0,canceled:0,orderRevenue:0,completedRevenue:0,approvedDepositCredit:0,serviceSync:{},warnings:[]};
+  try{Object.assign(safe,await adminDashboard(db));}catch(error){console.error('admin dashboard core:',errorInfo(error));safe.degraded=true;safe.warnings.push(`core:${errorInfo(error).code}`);}
+  try{const snap=await db.collection('system').doc('serviceSync').get();safe.serviceSync=snap.exists?serializeData(snap.data()||{}):{};}catch(error){console.error('dashboard serviceSync:',errorInfo(error));safe.degraded=true;safe.warnings.push(`system/serviceSync:${errorInfo(error).code}`);}
+  safe.degraded=Boolean(safe.degraded||safe.warnings.length);safe.generatedAt=new Date().toISOString();res.set('Cache-Control','no-store');return jsonSafe(res,safe,200);
+});
+
+app.get('/api/admin/provider/test', verifyToken, requireAdmin, async (req, res) => {
   try {
-    const dashboard = await adminDashboard(db);
-    let syncData = {};
-    try {
-      const serviceSync = await db.collection('system').doc('serviceSync').get();
-      syncData = serviceSync.exists ? serviceSync.data() || {} : {};
-    } catch (error) {
-      console.error('dashboard serviceSync:', error?.code || 'unknown', error?.message || error);
-      dashboard.warnings.push(`system/serviceSync: ${error?.code || 'unknown'}`);
-    }
-    res.set('Cache-Control', 'no-store');
-    res.json({ ok: true, ...dashboard, serviceSync: serializeData(syncData) });
+    const cfg = providerConfig();
+    const data = await providerServices();
+    if (!Array.isArray(data)) throw new Error('Provider không trả về mảng services');
+    return jsonSafe(res, { ok: true, provider: true, endpoint: cfg.url, serviceCount: data.length }, 200);
   } catch (error) {
-    console.error('admin dashboard:', error);
-    res.status(500).json({
+    console.error('provider test GET:', errorInfo(error));
+    return jsonSafe(res, {
       ok: false,
-      error: 'Không thể tải dashboard Admin.',
-      code: error?.code || 'unknown',
-      detail: process.env.NODE_ENV === 'production' ? undefined : (error?.message || String(error))
-    });
+      provider: false,
+      code: error?.providerCode || error?.code || 'PROVIDER_ERROR',
+      httpStatus: error?.providerStatus || null,
+      error: error?.message || 'Provider test failed'
+    }, 200);
   }
 });
 
-function serializeData(data) {
-  const result = { ...(data || {}) };
-  for (const key of Object.keys(result)) {
-    const value = result[key];
-    if (value && typeof value.toDate === 'function') result[key] = value.toDate().toISOString();
+app.post('/api/admin/provider/test', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const cfg = providerConfig();
+    const data = await providerServices();
+    if (!Array.isArray(data)) throw new Error('Provider không trả về mảng services');
+    return jsonSafe(res, { ok:true, provider:true, endpoint:cfg.url, serviceCount:data.length }, 200);
+  } catch (error) {
+    console.error('provider test:', errorInfo(error));
+    return jsonSafe(res, { ok:false, provider:false, code:error?.providerCode || error?.code || 'PROVIDER_ERROR', httpStatus:error?.providerStatus || null, error:error?.message || 'Provider test failed' }, 200);
   }
-  return result;
+});
+
+app.get('/api/admin/diagnostics', verifyToken, requireAdmin, async (req,res)=>{
+  const r={ok:true,version:APP_VERSION,node:process.version,environment:process.env.NODE_ENV||'production',checks:{},warnings:[]};
+  r.checks.firebaseAuth={configured:Boolean(admin.apps.length)};r.checks.adminEmail={configured:Boolean(ADMIN_EMAIL),value:ADMIN_EMAIL||null};
+  r.checks.provider={configured:Boolean(String(process.env.PROVIDER_API_URL||'').trim()&&String(process.env.PROVIDER_API_KEY||'').trim()),baseUrl:String(process.env.PROVIDER_API_URL||'').trim()||null};
+  r.checks.telegram={configured:Boolean(String(process.env.ADMIN_TELEGRAM_BOT_TOKEN||'').trim()),chatConfigured:Boolean(String(process.env.ADMIN_TELEGRAM_CHAT_ID||'').trim())};
+  try{await db.collection('admins').limit(1).get();r.checks.firestore={reachable:true};}catch(error){r.checks.firestore={reachable:false,code:errorInfo(error).code,message:errorInfo(error).message};r.warnings.push('Firestore unavailable');}
+  try{const x=await db.collection('service_catalog').limit(1).get();r.checks.serviceCatalog={reachable:true,hasData:!x.empty};}catch(error){r.checks.serviceCatalog={reachable:false,code:errorInfo(error).code};r.warnings.push('Service catalog unavailable');}
+  r.degraded=r.warnings.length>0;return jsonSafe(res,r,200);
+});
+
+app.post('/api/admin/orders/sync', verifyToken, requireAdmin, async (req,res)=>{
+  try{return jsonSafe(res,{ok:true,...(await cronModule.runScheduledSync(db,admin))},200);}catch(error){console.error('admin order sync:',errorInfo(error));return jsonSafe(res,{ok:true,degraded:true,code:'ORDER_SYNC_UNAVAILABLE',error:errorInfo(error).message,checked:0,updated:0,refunded:0},200);}
+});
+
+function serializeData(data) {
+  const result={...(data||{})};for(const key of Object.keys(result)){const value=result[key];if(value&&typeof value.toDate==='function')result[key]=value.toDate().toISOString();}return result;
 }
 
 app.get('/api/admin/services', verifyToken, requireAdmin, async (req, res) => {
@@ -489,7 +494,7 @@ app.get('/api/admin/services', verifyToken, requireAdmin, async (req, res) => {
     res.json({ ok: true, total: items.length, items, defaultMarkupPercent: Number(process.env.SERVICE_MARKUP_PERCENT || 0) });
   } catch (error) {
     console.error('admin services:', error);
-    res.status(502).json({ ok: false, error: 'Không thể tải service catalog.' });
+    return jsonSafe(res,{ok:true,degraded:true,total:0,items:[],warnings:[errorInfo(error).message],code:'SERVICE_CATALOG_UNAVAILABLE'},200);
   }
 });
 
@@ -499,7 +504,7 @@ app.post('/api/admin/services/sync', verifyToken, requireAdmin, async (req, res)
     res.json({ ok: true, serviceCount: services.length, markupPercent: Number(process.env.SERVICE_MARKUP_PERCENT || 0), syncedAt: new Date().toISOString() });
   } catch (error) {
     console.error('admin service sync:', error);
-    res.status(502).json({ ok: false, error: 'Không đồng bộ được dịch vụ từ Provider.' });
+    return jsonSafe(res,{ok:true,degraded:true,serviceCount:0,items:[],providerUnavailable:true,code:'PROVIDER_UNAVAILABLE',error:errorInfo(error).message},200);
   }
 });
 
@@ -720,6 +725,17 @@ app.use((error, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
+app.use((req, res) => {
+  if (req.path.startsWith('/api/')) return res.status(404).json({ ok:false, error:'API endpoint không tồn tại', path:req.path });
+  return res.status(404).json({ ok:false, error:'Not found' });
+});
+
+app.use((error, req, res, next) => {
+  console.error('unhandled express error:', errorInfo(error));
+  if (res.headersSent) return next(error);
+  return res.status(500).json({ ok:false, error:'Internal server error' });
+});
+
 if (require.main === module) {
   app.listen(PORT, async () => {
     console.log(`TDMS1VN API server listening on ${PORT}`);
@@ -739,11 +755,11 @@ if (require.main === module) {
     const serviceInterval = Number(process.env.SERVICE_AUTO_SYNC_INTERVAL_MS || 900000);
     if (Number.isFinite(serviceInterval) && serviceInterval >= 60000) {
       setInterval(() => {
-        cronModule.runScheduledServiceSync(db).catch(error => console.error('scheduled service sync:', error));
+        cronModule.runScheduledServiceSync(db, admin).catch(error => console.error('scheduled service sync:', error));
       }, serviceInterval).unref();
     }
     setTimeout(() => {
-      cronModule.runScheduledServiceSync(db).catch(error => console.error('initial service sync:', error));
+      cronModule.runScheduledServiceSync(db, admin).catch(error => console.error('initial service sync:', error));
     }, 5000).unref();
   });
 }
