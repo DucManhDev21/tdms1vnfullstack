@@ -1,13 +1,6 @@
-const axios = require('axios');
+const { providerStatus: providerStatusRequest } = require('./provider');
 const { getServices } = require('./services');
 const { roundMoney } = require('./pricing');
-
-function providerClient() {
-  const baseURL = String(process.env.PROVIDER_API_URL || '').trim();
-  const key = String(process.env.PROVIDER_API_KEY || '').trim();
-  if (!baseURL || !key) throw new Error('Provider API is not configured');
-  return axios.create({ baseURL, timeout: Number(process.env.PROVIDER_TIMEOUT_MS || 20000) });
-}
 
 function normalizeStatus(value) {
   const status = String(value || '').toLowerCase();
@@ -19,19 +12,12 @@ function normalizeStatus(value) {
 }
 
 async function providerStatus(providerOrderId) {
-  const response = await providerClient().post('', new URLSearchParams({
-    key: process.env.PROVIDER_API_KEY,
-    action: 'status',
-    order: String(providerOrderId)
-  }).toString(), {
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-  });
-  const data = response.data || {};
-  const remains = Number.parseInt(data.remains, 10);
+  const data = await providerStatusRequest(providerOrderId);
+  const remains = Number.parseInt(data?.remains, 10);
   return {
-    status: normalizeStatus(data.status),
+    status: normalizeStatus(data?.status),
     remains: Number.isFinite(remains) ? Math.max(0, remains) : 0,
-    charge: Number.parseFloat(data.charge ?? 0) || 0,
+    charge: Number.parseFloat(data?.charge ?? 0) || 0,
     raw: data
   };
 }
@@ -134,11 +120,11 @@ async function syncOrders({ db, admin, uid = null, limit = 100 } = {}) {
   const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 100);
   const services = await getServices(false, db);
   const serviceMap = new Map(services.map(service => [String(service.service), service]));
-  let query = db.collection('orders').where('status', 'in', ['Pending', 'In progress', 'Partial']).limit(uid ? Math.min(safeLimit * 3, 300) : safeLimit);
+  let query = db.collection('orders').where('status', 'in', ['Pending', 'In progress', 'Partial', 'AwaitingProvider']).limit(uid ? Math.min(safeLimit * 3, 300) : safeLimit);
   if (uid) query = db.collection('orders').where('uid', '==', uid).limit(Math.min(safeLimit * 3, 300));
 
   const raw = await query.get();
-  const docs = uid ? raw.docs.filter(doc => ['Pending', 'In progress', 'Partial'].includes(String(doc.data()?.status))).slice(0, safeLimit) : raw.docs;
+  const docs = uid ? raw.docs.filter(doc => ['Pending', 'In progress', 'Partial', 'AwaitingProvider'].includes(String(doc.data()?.status))).slice(0, safeLimit) : raw.docs;
   let updated = 0;
   let failed = 0;
   let refunded = 0;

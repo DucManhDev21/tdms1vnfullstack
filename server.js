@@ -15,6 +15,7 @@ const { getPricingOverrides, parseMarkup, roundMoney } = require('./pricing');
 const depositRouter = require('./deposit');
 const { startAdminBot } = require('./admin-bot');
 const { ensureOwnerAdmin, isAdmin, listAdmins, addAdmin, deleteAdmin } = require('./admins');
+const { providerConfig, providerServices } = require('./provider');
 
 const app = express();
 const PORT = Number(process.env.PORT || 8080);
@@ -196,7 +197,7 @@ app.get('/api', (req, res) => {
     service: 'TDMS1VN API',
     version: '11.1.0',
     frontend: 'https://tdms1vip.vercel.app',
-    endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me', '/api/admin/session','/api/admin/dashboard','/api/admin/diagnostics','/api/admin/orders/sync']
+    endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me', '/api/admin/session','/api/admin/dashboard','/api/admin/diagnostics','/api/admin/provider/test','/api/admin/orders/sync']
   });
 });
 
@@ -325,7 +326,7 @@ app.get('/api/admin/system', verifyToken, requireAdmin, async (req, res) => {
     });
   } catch (error) {
     console.error('admin system:', error);
-    res.status(500).json({ ok:false, error:'Không thể tải thông tin hệ thống.' });
+    return jsonSafe(res,{ok:true,degraded:true,error:'Không thể tải đầy đủ thông tin hệ thống.',warnings:[errorInfo(error).message]},200);
   }
 });
 
@@ -428,6 +429,18 @@ app.get('/api/admin/dashboard', verifyToken, requireAdmin, async (req,res)=>{
   try{Object.assign(safe,await adminDashboard(db));}catch(error){console.error('admin dashboard core:',errorInfo(error));safe.degraded=true;safe.warnings.push(`core:${errorInfo(error).code}`);}
   try{const snap=await db.collection('system').doc('serviceSync').get();safe.serviceSync=snap.exists?serializeData(snap.data()||{}):{};}catch(error){console.error('dashboard serviceSync:',errorInfo(error));safe.degraded=true;safe.warnings.push(`system/serviceSync:${errorInfo(error).code}`);}
   safe.degraded=Boolean(safe.degraded||safe.warnings.length);safe.generatedAt=new Date().toISOString();res.set('Cache-Control','no-store');return jsonSafe(res,safe,200);
+});
+
+app.post('/api/admin/provider/test', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const cfg = providerConfig();
+    const data = await providerServices();
+    if (!Array.isArray(data)) throw new Error('Provider không trả về mảng services');
+    return jsonSafe(res, { ok:true, provider:true, endpoint:cfg.url, serviceCount:data.length }, 200);
+  } catch (error) {
+    console.error('provider test:', errorInfo(error));
+    return jsonSafe(res, { ok:false, provider:false, code:error?.providerCode || error?.code || 'PROVIDER_ERROR', httpStatus:error?.providerStatus || null, error:error?.message || 'Provider test failed' }, 200);
+  }
 });
 
 app.get('/api/admin/diagnostics', verifyToken, requireAdmin, async (req,res)=>{
@@ -687,6 +700,17 @@ app.use((error, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
+app.use((req, res) => {
+  if (req.path.startsWith('/api/')) return res.status(404).json({ ok:false, error:'API endpoint không tồn tại', path:req.path });
+  return res.status(404).json({ ok:false, error:'Not found' });
+});
+
+app.use((error, req, res, next) => {
+  console.error('unhandled express error:', errorInfo(error));
+  if (res.headersSent) return next(error);
+  return res.status(500).json({ ok:false, error:'Internal server error' });
+});
+
 if (require.main === module) {
   app.listen(PORT, async () => {
     console.log(`TDMS1VN API server listening on ${PORT}`);
@@ -706,11 +730,11 @@ if (require.main === module) {
     const serviceInterval = Number(process.env.SERVICE_AUTO_SYNC_INTERVAL_MS || 900000);
     if (Number.isFinite(serviceInterval) && serviceInterval >= 60000) {
       setInterval(() => {
-        cronModule.runScheduledServiceSync(db).catch(error => console.error('scheduled service sync:', error));
+        cronModule.runScheduledServiceSync(db, admin).catch(error => console.error('scheduled service sync:', error));
       }, serviceInterval).unref();
     }
     setTimeout(() => {
-      cronModule.runScheduledServiceSync(db).catch(error => console.error('initial service sync:', error));
+      cronModule.runScheduledServiceSync(db, admin).catch(error => console.error('initial service sync:', error));
     }, 5000).unref();
   });
 }

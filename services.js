@@ -1,5 +1,5 @@
 const express = require('express');
-const axios = require('axios');
+const { providerServices } = require('./provider');
 const router = express.Router();
 const { applyPricing, defaultMarkupPercent, getPricingOverrides, roundMoney } = require('./pricing');
 
@@ -7,13 +7,6 @@ const CACHE_MS = Number(process.env.SERVICE_CACHE_MS || 5 * 60 * 1000);
 let cachedServices = null;
 let cachedAt = 0;
 let refreshPromise = null;
-
-function providerClient() {
-  const baseURL = String(process.env.PROVIDER_API_URL || '').trim();
-  const key = String(process.env.PROVIDER_API_KEY || '').trim();
-  if (!baseURL || !key) throw new Error('Provider API is not configured');
-  return axios.create({ baseURL, timeout: Number(process.env.PROVIDER_TIMEOUT_MS || 20000) });
-}
 
 function detectPlatform(name, category, raw) {
   const text = `${name || ''} ${category || ''} ${raw?.platform || ''}`.toLowerCase();
@@ -78,15 +71,9 @@ function normalizeService(row) {
 }
 
 async function fetchProviderServices() {
-  const response = await providerClient().post('', new URLSearchParams({
-    key: process.env.PROVIDER_API_KEY,
-    action: 'services'
-  }).toString(), {
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-  });
-
-  if (!Array.isArray(response.data)) throw new Error('Provider services response is not an array');
-  const normalized = response.data.map(normalizeService).filter(Boolean);
+  const data = await providerServices();
+  if (!Array.isArray(data)) throw new Error('Provider services response is not an array');
+  const normalized = data.map(normalizeService).filter(Boolean);
   if (!normalized.length) throw new Error('Provider returned no usable services');
   return normalized;
 }
