@@ -67,7 +67,9 @@ function normalizeService(row) {
     cancel: toBool(row.cancel)
   };
 
-  return applyPricing(base);
+  // Pricing is applied once, after all Provider services have been normalized.
+  // Do not apply markup here; getServices() applies the per-service override exactly once.
+  return base;
 }
 
 async function fetchProviderServices() {
