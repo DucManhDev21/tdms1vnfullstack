@@ -1,9 +1,16 @@
 const express = require('express');
-const { providerAddOrder } = require('./provider');
+const axios = require('axios');
 const crypto = require('crypto');
 const router = express.Router();
 const { getServices } = require('./services');
 const { calculateTotal, roundMoney } = require('./pricing');
+
+function providerClient() {
+  const baseURL = process.env.PROVIDER_API_URL;
+  const key = process.env.PROVIDER_API_KEY;
+  if (!baseURL || !key) throw new Error('Provider API is not configured');
+  return axios.create({ baseURL, timeout: Number(process.env.PROVIDER_TIMEOUT_MS || 20000) });
+}
 
 function requireUser(req, res, next) {
   return req.app.locals.verifyToken(req, res, next);
@@ -28,10 +35,20 @@ function normalizeProviderStatus(value) {
 }
 
 async function createProviderOrder({ serviceId, link, quantity }) {
-  const data = await providerAddOrder({ service: serviceId, link, quantity });
-  const providerOrderId = parseProviderOrderId(data);
+  const client = providerClient();
+  const body = new URLSearchParams({
+    key: process.env.PROVIDER_API_KEY,
+    action: 'add',
+    service: String(serviceId),
+    link,
+    quantity: String(quantity)
+  });
+  const response = await client.post('', body.toString(), {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+  });
+  const providerOrderId = parseProviderOrderId(response.data);
   if (!providerOrderId) {
-    const message = data?.error || data?.message || 'Provider không trả về mã đơn hàng';
+    const message = response.data?.error || response.data?.message || 'Provider did not return an order id';
     throw new Error(String(message));
   }
   return providerOrderId;
@@ -103,8 +120,7 @@ router.post('/', requireUser, async (req, res) => {
         markupPercent: service.markupPercent ?? 0,
         fixedUnitRateVnd: service.fixedUnitRateVnd ?? null,
         providerOrderId: '',
-        status: 'AwaitingProvider',
-        providerCallStartedAt: admin.firestore.FieldValue.serverTimestamp(),
+        status: 'Pending',
         remains: parsedQuantity,
         refill: service.refill,
         cancel: service.cancel,
@@ -135,7 +151,7 @@ router.post('/', requireUser, async (req, res) => {
 
     try {
       const providerOrderId = await createProviderOrder({ serviceId: parsedServiceId, link: String(link).trim(), quantity: parsedQuantity });
-      await db.collection('orders').doc(result.orderId).update({ providerOrderId, status: 'Pending', providerCallCompletedAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+      await db.collection('orders').doc(result.orderId).update({ providerOrderId, status: 'Pending', updatedAt: admin.firestore.FieldValue.serverTimestamp() });
       return res.status(201).json({ ok: true, orderId: result.orderId, providerOrderId, totalPrice });
     } catch (providerError) {
       const orderRef = db.collection('orders').doc(result.orderId);
@@ -150,7 +166,7 @@ router.post('/', requireUser, async (req, res) => {
         const refund = roundMoney(Number(order.totalPrice || 0));
         const newBalance = roundMoney(oldBalance + refund);
         tx.update(userRef, { balance: newBalance, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-        tx.update(orderRef, { status: 'Canceled', remains: Number(order.quantity || 0), providerError: true, refundAmount: refund, refundSettledAt: admin.firestore.FieldValue.serverTimestamp(), cancelReason: String(providerError.message || 'Provider error').slice(0, 500), updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+        tx.update(orderRef, { status: 'Canceled', remains: Number(order.quantity || 0), refundAmount: refund, refundSettledAt: admin.firestore.FieldValue.serverTimestamp(), cancelReason: String(providerError.message || 'Provider error').slice(0, 500), updatedAt: admin.firestore.FieldValue.serverTimestamp() });
         const logRef = db.collection('balance_logs').doc();
         tx.set(logRef, { uid, amount: refund, type: 'credit', reason: `Hoàn tiền đơn ${result.orderId}: Provider error`, oldBalance, newBalance, orderId: result.orderId, createdAt: admin.firestore.FieldValue.serverTimestamp() });
       });
