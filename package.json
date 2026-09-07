@@ -1,6 +1,6 @@
 {
   "name": "tdms1vn-backend",
-  "version": "13.0.0",
+  "version": "13.1.0",
   "private": true,
   "description": "TDMS1VN production backend: Express + Firebase Admin + Provider API + Telegram Admin Bot",
   "main": "server.js",
@@ -8,7 +8,9 @@
     "start": "node server.js",
     "check": "node --check server.js && node --check provider.js && node --check services.js && node --check pricing.js && node --check order.js && node --check order-sync.js && node --check deposit.js && node --check admin-bot.js && node --check admins.js && node --check cron.js"
   },
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "axios": "^1.8.4",
     "cors": "^2.8.5",

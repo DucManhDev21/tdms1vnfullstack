@@ -31,7 +31,8 @@ function normalizeService(row) {
   const platform = detectPlatform(name, category, row);
   const type = String(row.type ?? 'Default').trim() || 'Default';
   const rawRate = row.rate ?? row.price ?? row.cost ?? '';
-  const rateNumber = typeof rawRate === 'number' ? rawRate : Number.parseFloat(String(rawRate).replace(/[^0-9eE+\-.]/g, ''));
+  const rateText = rawRate === null || rawRate === undefined ? '' : String(rawRate).trim().replace(',', '.');
+  const rateNumber = Number(rateText);
   const minNumber = Number.parseInt(row.min ?? 0, 10);
   const maxNumber = Number.parseInt(row.max ?? 0, 10);
   const mode = String(process.env.PROVIDER_RATE_MODE || 'USD_PER_1000').trim().toUpperCase();
@@ -47,7 +48,7 @@ function normalizeService(row) {
   } else if (mode === 'USD_PER_1000') {
     const usdVnd = Number(process.env.USD_VND_RATE || 27000);
     if (!Number.isFinite(usdVnd) || usdVnd <= 0) throw new Error('USD_VND_RATE is invalid');
-    const providerUsdPer1000 = rateNumber >= 10 ? rateNumber / 1000 : rateNumber;
+    const providerUsdPer1000 = rateNumber / 1000;
     providerUnitVnd = providerUsdPer1000 * usdVnd / 1000;
   } else {
     throw new Error(`Unsupported PROVIDER_RATE_MODE: ${mode}`);
