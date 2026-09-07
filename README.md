@@ -1,47 +1,42 @@
-# TDMS1VN Backend FINAL 13.1.0
+# TDMS1VN Backend 13.1.0
 
-Đây là TOÀN BỘ BACKEND dành cho Railway. Không chứa index.html.
+Backend Node.js/Express for Railway.
 
-## Cấu trúc
-- server.js — Express API chính
-- provider.js — Provider API client, POST /api/v2
-- services.js — lấy/chuẩn hóa/cache dịch vụ
-- pricing.js — giá bán và tính tổng tiền
-- order.js — tạo đơn + trừ tiền bằng Firestore Transaction
-- order-sync.js — đồng bộ trạng thái + hoàn tiền
-- deposit.js — nạp tiền
-- admin-bot.js — Telegram Admin Bot
-- admins.js — quản lý Admin
-- cron.js — cron/sync
-- firebase.json
-- firestore.rules
-- .env.example
-- package.json
-- railway.toml
+## Required Railway variables
 
-## Railway
-Upload các file trong ZIP này ở ROOT repository.
+- `PORT` (Railway can provide this automatically)
+- `CORS_ORIGINS=https://tdms1vip.vercel.app`
+- `FIREBASE_SERVICE_ACCOUNT_JSON`
+- `PROVIDER_API_URL`
+- `PROVIDER_API_KEY`
+- `USD_VND_RATE=27000`
+- `PROVIDER_RATE_MODE=USD_PER_1000`
+- `SERVICE_MARKUP_PERCENT=30`
 
-Biến bắt buộc:
-- FIREBASE_SERVICE_ACCOUNT_JSON
-- PROVIDER_API_URL
-- PROVIDER_API_KEY
+Keep the Provider API key only on Railway.
 
-Provider:
-PROVIDER_API_URL=https://theodoigiatot.com/api/v2
+## Provider pricing compatibility
 
-Rate mặc định:
-PROVIDER_RATE_MODE=USD_PER_1000
-USD_VND_RATE=27000
+Version 13.1.0 fixes the pricing pipeline. The normalized provider unit price is now passed explicitly to the pricing layer instead of re-reading the raw provider `rate`.
 
-Với rate Provider 857.1185185185185, backend quy đổi khoảng 23.1422 VND/1.
+For `USD_PER_1000`, both common provider formats are accepted:
+- `0.857...` USD/1000
+- `857.118...` milli-USD/1000
 
-## Kiểm tra sau deploy
-1. /health
-2. /api/health
-3. /api/services
+A malformed individual provider service is skipped instead of causing the entire `/api/services` endpoint to return 502.
 
-/api/services là PUBLIC; frontend không cần Firebase Bearer Token để lấy danh sách dịch vụ.
+## Deploy
 
-## Frontend
-Frontend Vercel gọi /api/services. Không gọi trực tiếp Provider từ browser và không đưa PROVIDER_API_KEY vào index.html.
+Deploy this directory as the Railway service root. Railway will run:
+
+`npm start`
+
+After deployment test:
+
+`GET /api/health`
+
+Then:
+
+`GET /api/services`
+
+Expected `/api/services` response contains `services`, `count`, and pricing fields.

@@ -138,12 +138,12 @@ app.locals.verifyToken = verifyToken;
 
 app.get('/health', (req, res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok: true, service: 'TDMS1VN', version: '10.3.0', time: new Date().toISOString() });
+  res.json({ ok: true, service: 'TDMS1VN', version: '13.1.0', time: new Date().toISOString() });
 });
 
 app.get('/api/health', (req,res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok:true, service:'TDMS1VN API', version:'10.3.0', time:new Date().toISOString() });
+  res.json({ ok:true, service:'TDMS1VN API', version:'13.1.0', time:new Date().toISOString() });
 });
 
 app.get('/api/ping', (req,res) => res.json({ ok:true, time:new Date().toISOString() }));
@@ -173,7 +173,7 @@ app.get('/api', (req, res) => {
   res.json({
     ok: true,
     service: 'TDMS1VN API',
-    version: '10.3.0',
+    version: '13.1.0',
     frontend: 'https://tdms1vip.vercel.app',
     endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me', '/api/admin/session']
   });
@@ -283,7 +283,7 @@ app.get('/api/admin/system', verifyToken, requireAdmin, async (req, res) => {
     res.set('Cache-Control','no-store');
     res.json({
       ok:true,
-      api:{version:'10.3.0', node:process.version, environment:process.env.NODE_ENV || 'production'},
+      api:{version:'13.1.0', node:process.version, environment:process.env.NODE_ENV || 'production'},
       firebase:{projectId:process.env.FIREBASE_PROJECT_ID || null, configured:Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_JSON)},
       provider:{configured:Boolean(process.env.PROVIDER_API_URL && process.env.PROVIDER_API_KEY), baseUrl:process.env.PROVIDER_API_URL || null},
       telegram:{configured:Boolean(String(process.env.ADMIN_TELEGRAM_BOT_TOKEN || '').trim()), chatConfigured:Boolean(String(process.env.ADMIN_TELEGRAM_CHAT_ID || '').trim())},
