@@ -1,5 +1,3 @@
-'use strict';
-
 const DEFAULT_MARKUP_PERCENT = 0;
 const MAX_MARKUP_PERCENT = 1000;
 
@@ -25,10 +23,7 @@ async function getPricingOverrides(db) {
     const data = doc.data() || {};
     map.set(String(doc.id), {
       markupPercent: parseMarkup(data.markupPercent, defaultMarkupPercent()),
-      fixedUnitRateVnd:
-        data.fixedUnitRateVnd == null || data.fixedUnitRateVnd === ''
-          ? null
-          : roundMoney(data.fixedUnitRateVnd),
+      fixedUnitRateVnd: data.fixedUnitRateVnd == null || data.fixedUnitRateVnd === '' ? null : roundMoney(data.fixedUnitRateVnd),
       enabled: data.enabled !== false,
       updatedAt: data.updatedAt || null
     });
@@ -36,36 +31,13 @@ async function getPricingOverrides(db) {
   return map;
 }
 
-function getProviderUnitRate(service) {
-  // services.js normalizes the Provider rate into providerUnitRateVnd.
-  // Keep backward compatibility with older catalog/service objects.
-  const candidates = [
-    service?.providerUnitRateVnd,
-    service?.unitRateVnd,
-    service?.rate
-  ];
-
-  for (const candidate of candidates) {
-    if (candidate === null || candidate === undefined || candidate === '') continue;
-    const number = Number.parseFloat(String(candidate).replace(',', '.'));
-    if (Number.isFinite(number) && number >= 0) return number;
-  }
-
-  throw new Error(`Invalid provider rate for service ${service?.service}`);
-}
-
 function applyPricing(service, override = null) {
-  const providerUnitRate = getProviderUnitRate(service);
+  const providerUnitRate = Number(service.unitRateVnd ?? service.rate);
+  if (!Number.isFinite(providerUnitRate) || providerUnitRate < 0) throw new Error(`Invalid provider rate for service ${service.service}`);
   const markupPercent = parseMarkup(override?.markupPercent, defaultMarkupPercent());
   const customRate = override?.fixedUnitRateVnd;
-
-  const customRateNumber =
-    customRate !== null && customRate !== undefined && customRate !== ''
-      ? Number.parseFloat(String(customRate).replace(',', '.'))
-      : NaN;
-
-  const sellingRate = Number.isFinite(customRateNumber) && customRateNumber >= 0
-    ? roundMoney(customRateNumber)
+  const sellingRate = customRate != null && Number.isFinite(Number(customRate)) && Number(customRate) >= 0
+    ? roundMoney(customRate)
     : roundMoney(providerUnitRate * (1 + markupPercent / 100));
 
   return {
@@ -76,10 +48,7 @@ function applyPricing(service, override = null) {
     unitRateVnd: sellingRate,
     sellingRateVnd: sellingRate,
     markupPercent,
-    fixedUnitRateVnd:
-      customRateNumber >= 0 && Number.isFinite(customRateNumber)
-        ? roundMoney(customRateNumber)
-        : null,
+    fixedUnitRateVnd: customRate == null ? null : roundMoney(customRate),
     enabled: override?.enabled !== false
   };
 }
@@ -102,7 +71,6 @@ module.exports = {
   parseMarkup,
   defaultMarkupPercent,
   getPricingOverrides,
-  getProviderUnitRate,
   applyPricing,
   calculateTotal
 };

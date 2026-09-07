@@ -30,7 +30,8 @@ function normalizeService(row) {
   const category = String(row.category ?? row.type ?? 'Khác').trim() || 'Khác';
   const platform = detectPlatform(name, category, row);
   const type = String(row.type ?? 'Default').trim() || 'Default';
-  const rateNumber = Number.parseFloat(row.rate ?? 0);
+  const rawRate = row.rate ?? row.price ?? row.cost ?? '';
+  const rateNumber = typeof rawRate === 'number' ? rawRate : Number.parseFloat(String(rawRate).replace(/[^0-9eE+\-.]/g, ''));
   const minNumber = Number.parseInt(row.min ?? 0, 10);
   const maxNumber = Number.parseInt(row.max ?? 0, 10);
   const mode = String(process.env.PROVIDER_RATE_MODE || 'USD_PER_1000').trim().toUpperCase();
@@ -67,9 +68,7 @@ function normalizeService(row) {
     cancel: toBool(row.cancel)
   };
 
-  // Pricing is applied once, after all Provider services have been normalized.
-  // Do not apply markup here; getServices() applies the per-service override exactly once.
-  return base;
+  return applyPricing(base);
 }
 
 async function fetchProviderServices() {
