@@ -12,7 +12,11 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return false;
+      return signedIn()
+        && (
+          request.auth.token.admin == true
+          || request.auth.token.role == 'admin'
+        );
     }
 
     match /users/{uid} {
