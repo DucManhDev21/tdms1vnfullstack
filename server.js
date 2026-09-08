@@ -14,6 +14,7 @@ const servicesModule = require('./services');
 const { getPricingOverrides, parseMarkup, roundMoney } = require('./pricing');
 const depositRouter = require('./deposit');
 const { startAdminBot } = require('./admin-bot');
+const { ensureOwnerAdmin, isAdmin, listAdmins, addAdmin, deleteAdmin } = require('./admins');
 
 const app = express();
 const PORT = Number(process.env.PORT || 8080);
@@ -137,12 +138,12 @@ app.locals.verifyToken = verifyToken;
 
 app.get('/health', (req, res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok: true, service: 'TDMS1VN', version: '8.0.0', time: new Date().toISOString() });
+  res.json({ ok: true, service: 'TDMS1VN', version: '10.3.0', time: new Date().toISOString() });
 });
 
 app.get('/api/health', (req,res) => {
   res.set('Cache-Control','no-store');
-  res.json({ ok:true, service:'TDMS1VN API', version:'8.0.0', time:new Date().toISOString() });
+  res.json({ ok:true, service:'TDMS1VN API', version:'10.3.0', time:new Date().toISOString() });
 });
 
 app.get('/api/ping', (req,res) => res.json({ ok:true, time:new Date().toISOString() }));
@@ -172,126 +173,133 @@ app.get('/api', (req, res) => {
   res.json({
     ok: true,
     service: 'TDMS1VN API',
-    version: '8.0.0',
+    version: '10.3.0',
     frontend: 'https://tdms1vip.vercel.app',
     endpoints: ['/health', '/api/config/public', '/api/public/stats', '/api/services', '/api/orders', '/api/deposits', '/api/balance-logs', '/api/me', '/api/admin/session']
   });
 });
 
 
-app.post('/api/admin/setup', verifyToken, async (req, res) => {
-  try {
-    const setupSecret = String(process.env.ADMIN_SETUP_SECRET || '').trim();
-    const adminEmail = String(process.env.ADMIN_EMAIL || '').trim().toLowerCase();
-    if (!setupSecret) return res.status(503).json({ ok:false, error:'ADMIN_SETUP_SECRET chưa được cấu hình trên Railway.' });
-    if (!adminEmail) return res.status(503).json({ ok:false, error:'ADMIN_EMAIL chưa được cấu hình trên Railway.' });
-    const provided = String(req.body?.secret || '').trim();
-    if (!provided || provided.length < 16 || provided !== setupSecret) {
-      return res.status(403).json({ ok:false, error:'Mã thiết lập Admin không đúng.' });
-    }
-    const setupRef = db.collection('system').doc('adminSetup');
-    let userRecord = await auth.getUser(req.user.uid);
-    if (!userRecord.email || String(userRecord.email).trim().toLowerCase() !== adminEmail) {
-      return res.status(403).json({ ok:false, error:'Tài khoản đăng nhập không trùng ADMIN_EMAIL trên Railway.' });
-    }
-    if (String(req.body?.email || '').trim().toLowerCase() !== adminEmail) {
-      return res.status(400).json({ ok:false, error:'Gmail Admin không khớp cấu hình ADMIN_EMAIL.' });
-    }
-    // Admin setup already requires Firebase email/password authentication plus the private setup secret.
-    // For the one-time bootstrap flow, the backend marks this exact authenticated account as verified.
-    if (!userRecord.emailVerified) {
-      userRecord = await auth.updateUser(userRecord.uid, { emailVerified: true });
-    }
-    const result = await db.runTransaction(async tx => {
-      const snap = await tx.get(setupRef);
-      if (snap.exists && snap.data()?.completedAt) throw Object.assign(new Error('ADMIN_SETUP_LOCKED'), { code:'ADMIN_SETUP_LOCKED' });
-      tx.set(setupRef, { completedAt: admin.firestore.FieldValue.serverTimestamp(), uid:userRecord.uid, email:userRecord.email.toLowerCase(), version:'8.0.0' }, { merge:true });
-      return true;
-    });
-    if (result) {
-      await auth.setCustomUserClaims(userRecord.uid, { admin:true, role:'admin' });
-      await auth.revokeRefreshTokens(userRecord.uid);
-      return res.json({ ok:true, message:'Đã cấp quyền Admin. Hãy đăng nhập lại để nhận quyền mới.' });
-    }
-  } catch (error) {
-    if (error.code === 'ADMIN_SETUP_LOCKED') return res.status(409).json({ ok:false, error:'Trang thiết lập Admin đã được khóa sau lần tạo đầu tiên.' });
-    console.error('admin setup:', error);
-    return res.status(500).json({ ok:false, error:'Không thể thiết lập quyền Admin.' });
-  }
-});
+const ADMIN_EMAIL = String(process.env.ADMIN_EMAIL || '').trim().toLowerCase();
 
 app.get('/api/admin/session', verifyToken, async (req, res) => {
   try {
-    const token = req.user || {};
-    const isAdmin = token.admin === true || token.role === 'admin';
-    if (!isAdmin) return res.status(403).json({ ok:false, error:'Bạn không có quyền truy cập khu vực Admin.' });
-    const userRecord = await auth.getUser(token.uid);
-    if (userRecord.disabled) return res.status(403).json({ ok:false, error:'Tài khoản Admin đã bị vô hiệu hóa.' });
-    if (!userRecord.emailVerified) return res.status(403).json({ ok:false, error:'Gmail Admin chưa được xác minh.' });
+    const userRecord = await auth.getUser(req.user.uid);
+    const email = String(userRecord.email || '').trim().toLowerCase();
+    if (!email) return res.status(403).json({ ok:false, error:'Tài khoản chưa có email.' });
+    if (userRecord.disabled) return res.status(403).json({ ok:false, error:'Tài khoản đã bị vô hiệu hóa.' });
+    if (!userRecord.emailVerified) return res.status(403).json({ ok:false, error:'Gmail chưa được xác minh trên Firebase.' });
+    const allowed = await isAdmin(db, email);
+    if (!allowed) return res.status(403).json({ ok:false, error:'Tài khoản này không nằm trong danh sách Admin.' });
     res.set('Cache-Control','no-store');
-    res.json({ ok:true, admin:true, uid:userRecord.uid, email:userRecord.email || '', claims:{admin:true, role:token.role || 'admin'} });
+    res.json({ ok:true, admin:true, uid:userRecord.uid, email:userRecord.email });
   } catch (error) {
     console.error('admin session:', error);
     res.status(403).json({ ok:false, error:'Không thể xác thực phiên Admin.' });
   }
 });
 
-
-function requireAdmin(req, res, next) {
-  const token = req.user || {};
-  if (token.admin === true || token.role === 'admin') return next();
-  return res.status(403).json({ ok:false, error:'Bạn không có quyền Admin.' });
-}
-function serializeDoc(doc) {
-  const data = { id: doc.id, ...(doc.data() || {}) };
-  for (const key of Object.keys(data)) {
-    const value = data[key];
-    if (value && typeof value.toDate === 'function') data[key] = value.toDate().toISOString();
-  }
-  return data;
-}
-
-async function adminDashboard(db) {
-  const [usersCount, ordersCount, depositsCount, popupCount, completedCount, processingCount, canceledCount, orderSnap, depositSnap] = await Promise.all([
-    db.collection('users').count().get(),
-    db.collection('orders').count().get(),
-    db.collection('deposits').count().get(),
-    db.collection('popups').count().get(),
-    db.collection('orders').where('status', '==', 'Completed').count().get(),
-    db.collection('orders').where('status', 'in', ['Pending', 'In progress', 'Partial']).count().get(),
-    db.collection('orders').where('status', '==', 'Canceled').count().get(),
-    db.collection('orders').select('totalPrice', 'status').get(),
-    db.collection('deposits').select('creditedAmount', 'status').get()
-  ]);
-  let orderRevenue = 0;
-  let completedRevenue = 0;
-  let depositCredited = 0;
-  for (const doc of orderSnap.docs) {
-    const data = doc.data() || {};
-    const value = Number(data.totalPrice || 0);
-    if (Number.isFinite(value) && value >= 0) {
-      orderRevenue += value;
-      if (data.status === 'Completed') completedRevenue += value;
+async function requireAdmin(req, res, next) {
+  try {
+    const email = String(req.user?.email || '').trim().toLowerCase();
+    if (!email || !(await isAdmin(db, email))) {
+      return res.status(403).json({ ok:false, error:'Bạn không có quyền Admin.' });
     }
+    return next();
+  } catch (error) {
+    console.error('requireAdmin:', error);
+    return res.status(500).json({ ok:false, error:'Không thể kiểm tra quyền Admin.' });
   }
-  for (const doc of depositSnap.docs) {
-    const data = doc.data() || {};
-    const value = Number(data.creditedAmount || 0);
-    if (data.status === 'Đã duyệt' && Number.isFinite(value)) depositCredited += value;
-  }
-  return {
-    users: usersCount.data().count,
-    orders: ordersCount.data().count,
-    deposits: depositsCount.data().count,
-    popups: popupCount.data().count,
-    completed: completedCount.data().count,
-    processing: processingCount.data().count,
-    canceled: canceledCount.data().count,
-    orderRevenue: roundMoney(orderRevenue),
-    completedRevenue: roundMoney(completedRevenue),
-    approvedDepositCredit: roundMoney(depositCredited)
-  };
 }
+
+app.get('/api/admin/admins', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const items = await listAdmins(db);
+    res.set('Cache-Control','no-store');
+    res.json({ ok:true, total:items.length, items });
+  } catch (error) {
+    console.error('admin list:', error);
+    res.status(500).json({ ok:false, error:'Không thể tải danh sách Admin.' });
+  }
+});
+
+app.post('/api/admin/admins', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const email = String(req.body?.email || '').trim();
+    if (!email) return res.status(400).json({ ok:false, error:'Vui lòng nhập email Admin.' });
+    const item = await addAdmin(db, admin, email, { source:'web_admin', email:req.user.email || '', uid:req.user.uid });
+    res.status(201).json({ ok:true, item });
+  } catch (error) {
+    console.error('admin add:', error);
+    res.status(400).json({ ok:false, error:error.message || 'Không thể thêm Admin.' });
+  }
+});
+
+app.delete('/api/admin/admins/:email', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const email = decodeURIComponent(String(req.params.email || '')).trim();
+    const deleted = await deleteAdmin(db, admin, email, { source:'web_admin', email:req.user.email || '', uid:req.user.uid });
+    res.json({ ok:true, email:deleted });
+  } catch (error) {
+    console.error('admin delete:', error);
+    res.status(400).json({ ok:false, error:error.message || 'Không thể xóa Admin.' });
+  }
+});
+
+app.get('/api/admin/audit-logs', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit || '100', 10) || 100, 1), 300);
+    const snap = await db.collection('admin_audit_logs').limit(limit).get();
+    const items = snap.docs.map(serializeDoc).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
+    res.set('Cache-Control','no-store');
+    res.json({ ok:true, total:items.length, items });
+  } catch (error) {
+    console.error('admin audit logs:', error);
+    res.status(500).json({ ok:false, error:'Không thể tải nhật ký Admin.' });
+  }
+});
+
+app.get('/api/admin/balance-logs', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit || '100', 10) || 100, 1), 300);
+    const snap = await db.collection('balance_logs').limit(limit).get();
+    const items = snap.docs.map(serializeDoc).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')));
+    res.set('Cache-Control','no-store');
+    res.json({ ok:true, total:items.length, items });
+  } catch (error) {
+    console.error('admin balance logs:', error);
+    res.status(500).json({ ok:false, error:'Không thể tải biến động số dư.' });
+  }
+});
+
+app.get('/api/admin/system', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const [healthSnap, syncSnap] = await Promise.all([
+      db.collection('system').doc('health').get(),
+      db.collection('system').doc('serviceSync').get()
+    ]);
+    const recentAudit = await db.collection('admin_audit_logs').limit(10).get();
+    const admins = await listAdmins(db);
+    res.set('Cache-Control','no-store');
+    res.json({
+      ok:true,
+      api:{version:'10.3.0', node:process.version, environment:process.env.NODE_ENV || 'production'},
+      firebase:{projectId:process.env.FIREBASE_PROJECT_ID || null, configured:Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_JSON)},
+      provider:{configured:Boolean(process.env.PROVIDER_API_URL && process.env.PROVIDER_API_KEY), baseUrl:process.env.PROVIDER_API_URL || null},
+      telegram:{configured:Boolean(String(process.env.ADMIN_TELEGRAM_BOT_TOKEN || '').trim()), chatConfigured:Boolean(String(process.env.ADMIN_TELEGRAM_CHAT_ID || '').trim())},
+      cors:{origins:Array.from(allowedCorsOrigins).filter(x=>x!=='*')},
+      pricing:{mode:process.env.PROVIDER_RATE_MODE || 'USD_PER_1000', defaultMarkupPercent:Number(process.env.SERVICE_MARKUP_PERCENT || 0)},
+      bank:{accountName:process.env.BANK_ACCOUNT_NAME || '', accountNumber:process.env.BANK_ACCOUNT_NUMBER || '', bankBin:process.env.BANK_BIN || ''},
+      serviceSync:syncSnap.exists ? serializeData(syncSnap.data()) : {},
+      healthDoc:healthSnap.exists ? serializeData(healthSnap.data()) : {},
+      adminCount:admins.length,
+      recentAudit:recentAudit.docs.map(serializeDoc).sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||'')))
+    });
+  } catch (error) {
+    console.error('admin system:', error);
+    res.status(500).json({ ok:false, error:'Không thể tải thông tin hệ thống.' });
+  }
+});
 
 app.get('/api/admin/users', verifyToken, requireAdmin, async (req,res) => {
   try {
@@ -371,15 +379,115 @@ app.post('/api/admin/users/balance', verifyToken, requireAdmin, async (req,res) 
 });
 
 
+async function adminDashboard(db) {
+  const warnings = [];
+
+  async function readCollection(name) {
+    try {
+      return await db.collection(name).get();
+    } catch (error) {
+      const code = error?.code || 'unknown';
+      const message = error?.message || String(error);
+      console.error(`dashboard read ${name}:`, code, message);
+      warnings.push(`${name}: ${code}`);
+      return null;
+    }
+  }
+
+  const [usersSnap, ordersSnap, depositsSnap, popupsSnap] = await Promise.all([
+    readCollection('users'),
+    readCollection('orders'),
+    readCollection('deposits'),
+    readCollection('popups')
+  ]);
+
+  const orderDocs = ordersSnap?.docs || [];
+  const depositDocs = depositsSnap?.docs || [];
+
+  let completed = 0;
+  let processing = 0;
+  let canceled = 0;
+  let orderRevenue = 0;
+  let completedRevenue = 0;
+  let depositCredited = 0;
+
+  for (const doc of orderDocs) {
+    const data = doc.data() || {};
+    const status = String(data.status || '').trim().toLowerCase();
+    const value = Number(data.totalPrice || 0);
+    if (status === 'completed') completed += 1;
+    else if (['pending', 'in progress', 'partial', 'processing'].includes(status)) processing += 1;
+    else if (['canceled', 'cancelled'].includes(status)) canceled += 1;
+    if (Number.isFinite(value) && value >= 0) {
+      orderRevenue += value;
+      if (status === 'completed') completedRevenue += value;
+    }
+  }
+
+  for (const doc of depositDocs) {
+    const data = doc.data() || {};
+    const value = Number(data.creditedAmount || 0);
+    const status = String(data.status || '').trim().toLowerCase();
+    if (['đã duyệt', 'approved', 'completed'].includes(status) && Number.isFinite(value)) {
+      depositCredited += value;
+    }
+  }
+
+  return {
+    users: usersSnap?.size || 0,
+    orders: ordersSnap?.size || 0,
+    deposits: depositsSnap?.size || 0,
+    popups: popupsSnap?.size || 0,
+    completed,
+    processing,
+    canceled,
+    orderRevenue: roundMoney(orderRevenue),
+    completedRevenue: roundMoney(completedRevenue),
+    approvedDepositCredit: roundMoney(depositCredited),
+    warnings
+  };
+}
+
+app.get('/api/admin/stats', verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const [users, orders, pending, completed, deposits, popups, admins] = await Promise.all([
+      db.collection('users').count().get(),
+      db.collection('orders').count().get(),
+      db.collection('orders').where('status','in',['Pending','In progress','Partial']).count().get(),
+      db.collection('orders').where('status','==','Completed').count().get(),
+      db.collection('deposits').count().get(),
+      db.collection('popups').count().get(),
+      db.collection('admins').where('active','==',true).count().get().catch(()=>({data:()=>({count:0})}))
+    ]);
+    res.set('Cache-Control','no-store');
+    res.json({ok:true, users:users.data().count, orders:orders.data().count, processing:pending.data().count, completed:completed.data().count, deposits:deposits.data().count, popups:popups.data().count, admins:admins.data().count, generatedAt:new Date().toISOString()});
+  } catch(error) {
+    console.error('admin stats:', error);
+    res.status(500).json({ok:false,error:'Không thể tải thống kê Admin.'});
+  }
+});
+
 app.get('/api/admin/dashboard', verifyToken, requireAdmin, async (req, res) => {
   try {
     const dashboard = await adminDashboard(db);
-    const serviceSync = await db.collection('system').doc('serviceSync').get();
-    const syncData = serviceSync.exists ? serviceSync.data() || {} : {};
+    let syncData = {};
+    try {
+      const serviceSync = await db.collection('system').doc('serviceSync').get();
+      syncData = serviceSync.exists ? serviceSync.data() || {} : {};
+    } catch (error) {
+      console.error('dashboard serviceSync:', error?.code || 'unknown', error?.message || error);
+      dashboard.warnings.push(`system/serviceSync: ${error?.code || 'unknown'}`);
+    }
+    res.set('Cache-Control', 'no-store');
     res.json({ ok: true, ...dashboard, serviceSync: serializeData(syncData) });
   } catch (error) {
     console.error('admin dashboard:', error);
-    res.status(500).json({ ok: false, error: 'Không thể tải dashboard Admin.' });
+    res.status(500).json({
+      ok: false,
+      error: 'Không thể tải dashboard Admin.',
+      code: error?.code || 'unknown',
+      detail: process.env.NODE_ENV === 'production' ? undefined : (error?.message || String(error))
+    });
   }
 });
 
@@ -632,8 +740,14 @@ app.use((error, req, res, next) => {
 });
 
 if (require.main === module) {
-  app.listen(PORT, () => {
+  app.listen(PORT, async () => {
     console.log(`TDMS1VN API server listening on ${PORT}`);
+    try {
+      const owner = await ensureOwnerAdmin(db, admin);
+      console.log(`Admin owner bootstrap ready: ${owner}`);
+    } catch (error) {
+      console.error('Admin bootstrap:', error.message);
+    }
     startAdminBot(db, admin).catch(error => console.error('Admin Telegram bot startup:', error));
     const orderInterval = Number(process.env.ORDER_SYNC_INTERVAL_MS || 300000);
     if (Number.isFinite(orderInterval) && orderInterval >= 60000) {

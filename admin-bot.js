@@ -1,6 +1,7 @@
 const axios = require('axios');
 const { syncOrders } = require('./order-sync');
 const { syncServices } = require('./services');
+const { addAdmin, deleteAdmin, listAdmins, validateEmail, ownerEmail } = require('./admins');
 
 let started = false;
 let offset = 0;
@@ -53,61 +54,25 @@ function parseTake(text) {
   return { username, amount: Math.round(amount * 100) / 100 };
 }
 
-function normalizeEmail(value) {
-  return String(value || '').trim().toLowerCase();
-}
-function validEmail(email) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeEmail(email));
-}
-function parseAdminEmailCommand(text, command) {
+function parseAdminEmail(text, command) {
   const p = String(text || '').trim().split(/\s+/);
-  if (p.length !== 2 || !validEmail(p[1])) {
-    throw new Error(`Cú pháp: ${command} gmail@example.com`);
+  if (p.length !== 2) throw new Error(`Cú pháp: ${command} email@gmail.com`);
+  return validateEmail(p[1]);
+}
+
+async function sendAdminList(chatId, db) {
+  const admins = await listAdmins(db);
+  const owner = ownerEmail();
+  if (!admins.length) {
+    return telegram('sendMessage', { chat_id: chatId, text: '📋 <b>DANH SÁCH ADMIN</b>\n\nChưa có Admin nào.', parse_mode:'HTML' });
   }
-  return normalizeEmail(p[1]);
+  const lines = admins.map((item, index) => {
+    const badge = String(item.email).toLowerCase() === owner ? ' 👑 <b>OWNER</b>' : '';
+    return `${index + 1}. <code>${esc(item.email)}</code>${badge}`;
+  });
+  return telegram('sendMessage', { chat_id: chatId, text:`👑 <b>DANH SÁCH ADMIN (${admins.length})</b>\n\n${lines.join('\n')}`, parse_mode:'HTML' });
 }
-async function addAdmin(admin, email) {
-  const user = await admin.auth().getUserByEmail(email);
-  if (user.disabled) throw new Error('Tài khoản Firebase này đang bị vô hiệu hóa.');
-  const claims = { ...(user.customClaims || {}), admin: true, role: 'admin' };
-  await admin.auth().setCustomUserClaims(user.uid, claims);
-  return { uid: user.uid, email: user.email || email, displayName: user.displayName || '', disabled: !!user.disabled };
-}
-async function listAdmins(admin) {
-  const items = [];
-  let pageToken;
-  do {
-    const page = await admin.auth().listUsers(1000, pageToken);
-    for (const user of page.users) {
-      const claims = user.customClaims || {};
-      if (claims.admin === true || claims.role === 'admin') {
-        items.push({
-          uid: user.uid,
-          email: user.email || '',
-          displayName: user.displayName || '',
-          disabled: !!user.disabled,
-          emailVerified: !!user.emailVerified
-        });
-      }
-    }
-    pageToken = page.pageToken;
-  } while (pageToken);
-  return items.sort((a, b) => a.email.localeCompare(b.email));
-}
-async function deleteAdmin(admin, email) {
-  const normalized = normalizeEmail(email);
-  const protectedEmail = normalizeEmail(process.env.ADMIN_EMAIL);
-  if (protectedEmail && normalized === protectedEmail) {
-    throw new Error('Không thể xóa ADMIN_EMAIL gốc đã cấu hình trên Railway.');
-  }
-  const user = await admin.auth().getUserByEmail(normalized);
-  const claims = { ...(user.customClaims || {}) };
-  delete claims.admin;
-  if (claims.role === 'admin') delete claims.role;
-  await admin.auth().setCustomUserClaims(user.uid, claims);
-  await admin.auth().revokeRefreshTokens(user.uid);
-  return { uid: user.uid, email: user.email || normalized };
-}
+
 function validPopupId(id) { return /^[A-Za-z0-9_-]{1,64}$/.test(String(id || '').trim()); }
 function parseAddPopup(text) {
   const raw = String(text || '').trim();
@@ -193,12 +158,23 @@ async function deletePopup(db,id) {
   await db.runTransaction(async tx=>{const snap=await tx.get(ref);if(!snap.exists)throw new Error(`Không tìm thấy popup ${id}.`);tx.delete(ref);});
 }
 async function sendHelp(chatId) {
-  return telegram('sendMessage',{chat_id:chatId,text:'<b>TDMS1VN V8 ADMIN BOT</b>\n\n/pay username số_tiền\n/take username số_tiền\n/syncorders\n/syncservices\n/stats\n/addadmin gmail@example.com\n/listadmin\n/deleteadmin gmail@example.com\n/addpopup ID | Tiêu đề | Nội dung\n/deletepopup ID\n/help\n\nVí dụ:\n/pay hung123 50000\n/take hung123 50000\n/addadmin admin2@gmail.com\n/listadmin\n/deleteadmin admin2@gmail.com\n/addpopup TB1 | Khuyến mãi | Nội dung thông báo\n/deletepopup TB1',parse_mode:'HTML'});
+  return telegram('sendMessage',{chat_id:chatId,text:'<b>TDMS1VN V10 ADMIN BOT</b>\n\n/pay username số_tiền\n/take username số_tiền\n/syncorders\n/syncservices\n/stats\n/addpopup ID | Tiêu đề | Nội dung\n/deletepopup ID\n/addadmin email@gmail.com\n/deleteadmin email@gmail.com\n/listadmin\n/help\n\nVí dụ:\n/pay hung123 50000\n/take hung123 50000\n/addpopup TB1 | Khuyến mãi | Nội dung thông báo\n/deletepopup TB1\n/addadmin admin2@gmail.com\n/deleteadmin admin2@gmail.com\n/listadmin',parse_mode:'HTML'});
 }
 async function handleMessage(message,db,admin) {
   const chatId=String(message?.chat?.id||''); const text=String(message?.text||'').trim(); if(!text.startsWith('/'))return;
   const command=text.split(/\s+/)[0].split('@')[0].toLowerCase();
   if(command==='/start'||command==='/help')return sendHelp(chatId);
+  if(command==='/listadmin') return sendAdminList(chatId, db);
+  if(command==='/addadmin'){
+    const email=parseAdminEmail(text,'/addadmin');
+    const added=await addAdmin(db,admin,email,{source:'telegram',telegramUserId:String(message?.from?.id||''),telegramUsername:String(message?.from?.username||'')});
+    return telegram('sendMessage',{chat_id:chatId,text:`✅ <b>ĐÃ THÊM ADMIN</b>\n\n📧 <code>${esc(added.email)}</code>\n\nTài khoản này đăng nhập Firebase bằng đúng email trên sẽ có quyền Admin.`,parse_mode:'HTML'});
+  }
+  if(command==='/deleteadmin'){
+    const email=parseAdminEmail(text,'/deleteadmin');
+    const deleted=await deleteAdmin(db,admin,email,{source:'telegram',telegramUserId:String(message?.from?.id||''),telegramUsername:String(message?.from?.username||'')});
+    return telegram('sendMessage',{chat_id:chatId,text:`🗑️ <b>ĐÃ XÓA ADMIN</b>\n\n📧 <code>${esc(deleted)}</code>\n\nQuyền Admin sẽ không còn hiệu lực ở lần kiểm tra phiên tiếp theo.`,parse_mode:'HTML'});
+  }
   if(command==='/pay'){const {username,amount}=parsePay(text);const r=await pay(db,admin,username,amount);return telegram('sendMessage',{chat_id:chatId,text:`✅ <b>CỘNG TIỀN THÀNH CÔNG</b>\n\n👤 Username: <code>@${esc(r.username)}</code>\n📧 Gmail: <code>${esc(r.email||'—')}</code>\n💰 Cộng: <b>${money(r.amount)}</b>\n💳 Số dư cũ: ${money(r.oldBalance)}\n💳 Số dư mới: <b>${money(r.newBalance)}</b>`,parse_mode:'HTML'});}
   if(command==='/take'){const {username,amount}=parseTake(text);const r=await take(db,admin,username,amount);return telegram('sendMessage',{chat_id:chatId,text:`✅ <b>TRỪ TIỀN THÀNH CÔNG</b>\n\n👤 Username: <code>@${esc(r.username)}</code>\n📧 Gmail: <code>${esc(r.email||'—')}</code>\n💸 Trừ: <b>${money(r.amount)}</b>\n💳 Số dư cũ: ${money(r.oldBalance)}\n💳 Số dư mới: <b>${money(r.newBalance)}</b>`,parse_mode:'HTML'});}
   if(command==='/syncorders'){
@@ -217,23 +193,7 @@ async function handleMessage(message,db,admin) {
       db.collection('orders').where('status','==','Completed').count().get(),
       db.collection('deposits').count().get()
     ]);
-    return telegram('sendMessage',{chat_id:chatId,text:`📊 <b>TDMS1VN V8</b>\n\n👤 Users: <b>${users.data().count}</b>\n📦 Orders: <b>${orders.data().count}</b>\n⏳ Đang chạy: <b>${pending.data().count}</b>\n✅ Completed: <b>${completed.data().count}</b>\n💰 Deposit requests: <b>${deposits.data().count}</b>`,parse_mode:'HTML'});
-  }
-  if(command==='/addadmin'){
-    const email=parseAdminEmailCommand(text,'/addadmin');
-    const r=await addAdmin(admin,email);
-    return telegram('sendMessage',{chat_id:chatId,text:`✅ <b>ĐÃ THÊM ADMIN</b>\n\n📧 Gmail: <code>${esc(r.email)}</code>\n🆔 UID: <code>${esc(r.uid)}</code>\n\n⚠️ Tài khoản cần đăng nhập lại để nhận custom claim mới.`,parse_mode:'HTML'});
-  }
-  if(command==='/listadmin'){
-    const admins=await listAdmins(admin);
-    if(!admins.length) return telegram('sendMessage',{chat_id:chatId,text:'⚠️ Chưa có tài khoản Admin nào.'});
-    const body=admins.map((x,i)=>`${i+1}. <b>${esc(x.email||'—')}</b>${x.displayName?` — ${esc(x.displayName)}`:''}\n   UID: <code>${esc(x.uid)}</code>\n   ${x.disabled?'🔒 Disabled':'✅ Active'} · ${x.emailVerified?'✓ Verified':'⚠️ Chưa verify'}`).join('\n\n');
-    return telegram('sendMessage',{chat_id:chatId,text:`<b>👑 DANH SÁCH ADMIN (${admins.length})</b>\n\n${body}`,parse_mode:'HTML'});
-  }
-  if(command==='/deleteadmin'){
-    const email=parseAdminEmailCommand(text,'/deleteadmin');
-    const r=await deleteAdmin(admin,email);
-    return telegram('sendMessage',{chat_id:chatId,text:`🗑️ <b>ĐÃ XÓA QUYỀN ADMIN</b>\n\n📧 Gmail: <code>${esc(r.email)}</code>\n🆔 UID: <code>${esc(r.uid)}</code>`,parse_mode:'HTML'});
+    return telegram('sendMessage',{chat_id:chatId,text:`📊 <b>TDMS1VN V10</b>\n\n👤 Users: <b>${users.data().count}</b>\n📦 Orders: <b>${orders.data().count}</b>\n⏳ Đang chạy: <b>${pending.data().count}</b>\n✅ Completed: <b>${completed.data().count}</b>\n💰 Deposit requests: <b>${deposits.data().count}</b>`,parse_mode:'HTML'});
   }
   if(command==='/addpopup'){const data=parseAddPopup(text);await addPopup(db,admin,data);return telegram('sendMessage',{chat_id:chatId,text:`✅ <b>ĐÃ THÊM POPUP</b>\n\n🆔 ID: <code>${esc(data.id)}</code>\n📌 Tiêu đề: <b>${esc(data.title)}</b>\n📝 Nội dung: ${esc(data.content)}`,parse_mode:'HTML'});}
   if(command==='/deletepopup'){const id=parseDeletePopup(text);await deletePopup(db,id);return telegram('sendMessage',{chat_id:chatId,text:`🗑️ Đã xóa popup <code>${esc(id)}</code>.`,parse_mode:'HTML'});}
@@ -264,4 +224,4 @@ async function startAdminBot(db,admin){
     }
   }catch(error){started=false;console.error('Admin Telegram startup failed:',error.response?.data||error.message);}
 }
-module.exports={startAdminBot,parsePay,parseTake,parseAddPopup,parseDeletePopup,parseAdminEmailCommand,validEmail};
+module.exports={startAdminBot,parsePay,parseTake,parseAddPopup,parseDeletePopup};
