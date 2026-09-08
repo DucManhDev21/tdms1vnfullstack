@@ -86,7 +86,14 @@ async function fetchProviderServices() {
   });
 
   if (!Array.isArray(response.data)) throw new Error('Provider services response is not an array');
-  const normalized = response.data.map(normalizeService).filter(Boolean);
+  const normalized = response.data.map((row) => {
+    try {
+      return normalizeService(row);
+    } catch (error) {
+      console.error(`Provider service ${row?.service ?? row?.id ?? 'unknown'} skipped:`, error.message);
+      return null;
+    }
+  }).filter(Boolean);
   if (!normalized.length) throw new Error('Provider returned no usable services');
   return normalized;
 }
@@ -152,7 +159,7 @@ router.get('/', async (req, res) => {
     res.json({ services, cachedAt, count: services.length, defaultMarkupPercent: defaultMarkupPercent() });
   } catch (error) {
     console.error('services:', error.message);
-    res.status(502).json({ error: 'Không lấy được danh sách dịch vụ từ Provider' });
+    res.status(502).json({ error: 'Không lấy được danh sách dịch vụ từ Provider', code: 'PROVIDER_ERROR', httpStatus: error.response?.status ?? null, message: error.message, providerConfigured: Boolean(process.env.PROVIDER_API_URL && process.env.PROVIDER_API_KEY) });
   }
 });
 

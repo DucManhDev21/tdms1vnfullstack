@@ -448,25 +448,6 @@ async function adminDashboard(db) {
   };
 }
 
-app.get('/api/admin/stats', verifyToken, requireAdmin, async (req, res) => {
-  try {
-    const [users, orders, pending, completed, deposits, popups, admins] = await Promise.all([
-      db.collection('users').count().get(),
-      db.collection('orders').count().get(),
-      db.collection('orders').where('status','in',['Pending','In progress','Partial']).count().get(),
-      db.collection('orders').where('status','==','Completed').count().get(),
-      db.collection('deposits').count().get(),
-      db.collection('popups').count().get(),
-      db.collection('admins').where('active','==',true).count().get().catch(()=>({data:()=>({count:0})}))
-    ]);
-    res.set('Cache-Control','no-store');
-    res.json({ok:true, users:users.data().count, orders:orders.data().count, processing:pending.data().count, completed:completed.data().count, deposits:deposits.data().count, popups:popups.data().count, admins:admins.data().count, generatedAt:new Date().toISOString()});
-  } catch(error) {
-    console.error('admin stats:', error);
-    res.status(500).json({ok:false,error:'Không thể tải thống kê Admin.'});
-  }
-});
-
 app.get('/api/admin/dashboard', verifyToken, requireAdmin, async (req, res) => {
   try {
     const dashboard = await adminDashboard(db);

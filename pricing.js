@@ -32,7 +32,7 @@ async function getPricingOverrides(db) {
 }
 
 function applyPricing(service, override = null) {
-  const providerUnitRate = Number(service.unitRateVnd ?? service.rate);
+  const providerUnitRate = Number(service.providerUnitRateVnd ?? service.unitRateVnd ?? service.rate ?? service.providerRate);
   if (!Number.isFinite(providerUnitRate) || providerUnitRate < 0) throw new Error(`Invalid provider rate for service ${service.service}`);
   const markupPercent = parseMarkup(override?.markupPercent, defaultMarkupPercent());
   const customRate = override?.fixedUnitRateVnd;
